@@ -15,7 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional, Union, BinaryIO, Iterator, TYPE_CHECKING
 
-from aspose.words_foss.reader import (
+from aspose.words_foss.docx_reader import (
     ParagraphData,
     RunData,
     TableData,

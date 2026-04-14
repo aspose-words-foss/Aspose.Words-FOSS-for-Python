@@ -1,6 +1,6 @@
 [project]
 name = "aspose-words-foss"
-version = "26.4.0"
+version = "26.4.1"
 description = "Lightweight free open-source alternative to Aspose.Words — convert DOCX, DOC, RTF to Markdown, text, and PDF"
 readme = "README.md"
 license = {text = "MIT"}
@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "Pillow>=10.0.0",
     "pytest>=9.0.2",
 ]
 

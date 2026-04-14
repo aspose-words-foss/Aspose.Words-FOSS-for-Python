@@ -3,7 +3,7 @@
 from typing import Optional
 
 from aspose.words_foss.models import ConversionOptions, ListMarker
-from aspose.words_foss.reader import ParagraphData, DocumentReader
+from aspose.words_foss.docx_reader import ParagraphData, DocumentReader
 
 
 class ListHandler:

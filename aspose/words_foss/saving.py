@@ -22,6 +22,30 @@ class MarkdownListExportMode:
     PLAIN_TEXT = "plain_text"
 
 
+class MarkdownLinkExportMode:
+    """Link export mode options (mirrors aspose.words.saving.MarkdownLinkExportMode)."""
+
+    AUTO = "auto"
+    INLINE = "inline"
+    REFERENCE = "reference"
+
+
+class MarkdownExportAsHtml:
+    """Controls which elements are exported as raw HTML (mirrors aspose.words.saving.MarkdownExportAsHtml)."""
+
+    NONE = "none"
+    TABLES = "tables"
+    NON_COMPATIBLE_TABLES = "non_compatible_tables"
+
+
+class MarkdownEmptyParagraphExportMode:
+    """Controls how empty paragraphs are exported (mirrors aspose.words.saving.MarkdownEmptyParagraphExportMode)."""
+
+    EMPTY_LINE = "empty_line"
+    MARKDOWN_HARD_LINE_BREAK = "markdown_hard_line_break"
+    NONE = "none"
+
+
 class PdfCompliance:
     """PDF standards compliance level (mirrors aspose.words.saving.PdfCompliance)."""
 
@@ -147,3 +171,8 @@ class MarkdownSaveOptions:
         self.images_folder: str = ""
         self.images_folder_alias: str = ""
         self.export_underline_formatting: bool = False
+        self.link_export_mode: str = MarkdownLinkExportMode.AUTO
+        self.export_as_html: str = MarkdownExportAsHtml.NONE
+        self.empty_paragraph_export_mode: str = MarkdownEmptyParagraphExportMode.EMPTY_LINE
+        self.image_resolution: int = 96
+        self.save_format: str = "markdown"

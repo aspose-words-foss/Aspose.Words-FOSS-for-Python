@@ -162,9 +162,17 @@ class Document:
         if options is not None:
             if options.export_underline_formatting:
                 conversion_opts.export_underline = True
+            conversion_opts.table_content_alignment = options.table_content_alignment
+            conversion_opts.list_export_mode = options.list_export_mode
+            conversion_opts.link_export_mode = options.link_export_mode
+            conversion_opts.export_as_html = options.export_as_html
+            conversion_opts.empty_paragraph_export_mode = options.empty_paragraph_export_mode
+            conversion_opts.export_images_as_base64 = options.export_images_as_base64
+            conversion_opts.images_folder = options.images_folder
+            conversion_opts.images_folder_alias = options.images_folder_alias
 
         writer = LdmMarkdownWriter(conversion_opts)
-        markdown = writer.write(doc)
+        markdown = writer.write(doc, output_path=output_path)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(markdown, encoding="utf-8")

@@ -1,0 +1,36 @@
+"""Border-related enums mirroring Aspose.Words."""
+
+
+class LineStyle:
+    """Specifies line style of a border.
+
+    Mirrors ``Aspose.Words.LineStyle``.
+    """
+
+    NONE = 0
+    SINGLE = 1
+    THICK = 2
+    DOUBLE = 3
+    HAIRLINE = 5
+    DOT = 6
+    DASH_LARGE_GAP = 7
+    DOT_DASH = 8
+    DOT_DOT_DASH = 9
+    TRIPLE = 10
+    THIN_THICK_SMALL_GAP = 11
+    THICK_THIN_SMALL_GAP = 12
+    THIN_THICK_THIN_SMALL_GAP = 13
+    THIN_THICK_MEDIUM_GAP = 14
+    THICK_THIN_MEDIUM_GAP = 15
+    THIN_THICK_THIN_MEDIUM_GAP = 16
+    THIN_THICK_LARGE_GAP = 17
+    THICK_THIN_LARGE_GAP = 18
+    THIN_THICK_THIN_LARGE_GAP = 19
+    WAVE = 20
+    DOUBLE_WAVE = 21
+    DASH_SMALL_GAP = 22
+    DASH_DOT_STROKER = 23
+    EMBOSS_3D = 24
+    ENGRAVE_3D = 25
+    OUTSET = 26
+    INSET = 27

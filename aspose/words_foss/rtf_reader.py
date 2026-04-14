@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Optional, Union, BinaryIO, Iterator, TYPE_CHECKING
 
 from aspose.words_foss.doc_reader import DocFileReader
-from aspose.words_foss.reader import (
+from aspose.words_foss.docx_reader import (
     ParagraphData,
     TableData,
     NumberingInfo,

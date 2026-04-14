@@ -3,7 +3,7 @@
 from typing import Optional
 
 from aspose.words_foss.models import Table, TableRow, TableCell, ConversionOptions
-from aspose.words_foss.reader import TableData, CellData, ParagraphData, RunData
+from aspose.words_foss.docx_reader import TableData, CellData, ParagraphData, RunData
 
 
 class TableConverter:

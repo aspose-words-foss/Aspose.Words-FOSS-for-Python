@@ -51,6 +51,6 @@ def create_reader(suffix: str) -> DocumentFormatReader:
 
         return RtfFileReader()
     else:
-        from aspose.words_foss.reader import DocumentReader
+        from aspose.words_foss.docx_reader import DocumentReader
 
         return DocumentReader()

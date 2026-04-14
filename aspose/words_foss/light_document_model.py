@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal, Optional, Union
 
-from pydantic import BaseModel, BeforeValidator, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, field_validator
 
 # ─────────────────────────────────────────────
 # Primitives
@@ -127,13 +127,39 @@ class ShapeNode(BaseModel):
     name: str = ""
     width: float | None = None
     height: float | None = None
+    # Aspose.Words ``Shape.Left`` / ``Shape.Top`` — absolute page
+    # position of the shape's top-left corner.  Populated by the
+    # reader for anchored (``wp:anchor``) shapes.
+    left: float = 0.0
+    top: float = 0.0
     is_inline: bool | None = None
     has_image: bool | None = None
     image_data: Optional[ImageData] = None
     text_box: dict[str, Any] | None = None  # textbox paragraph content
-    # REMOVED: left, top, wrap_type, wrap_side, relative_horizontal_position,
+    # Shape fill, reusing the Shading primitive that Paragraph / Cell
+    # already carry.  Only ``background_color`` is populated — solid
+    # fills are the only kind supported by the PDF writer.
+    shading: Shading = Field(default_factory=Shading)
+    # Shape outline ("stroke" in Aspose.Words), reusing the Border
+    # primitive.  A single-element list is used when the shape has a
+    # plain rectangular outline.
+    borders: list[Border] = Field(default_factory=list)
+    # Vertical alignment of the text-box content inside the shape's
+    # bounding box: 0=Top (default), 1=Center, 2=Bottom.  Follows the
+    # same integer convention as ``CellFormat.vertical_alignment``.
+    vertical_alignment: int = 0
+    # WrapType (see drawing.WrapType):
+    # 0=Inline, 1=TopBottom, 2=Square, 3=None, 4=Tight, 5=Through.
+    wrap_type: int = 0  # WrapType.INLINE
+    # REMOVED: wrap_side, relative_horizontal_position,
     #          relative_vertical_position, horizontal_alignment,
-    #          vertical_alignment, rotation, z_order, behind_text
+    #          rotation, z_order, behind_text
+
+    # Runtime-only flag (not part of the JSON schema / not serialised)
+    # set by the reader when the shape carries absolute page
+    # coordinates extracted from an anchored group.  The PDF writer
+    # uses it to branch into the absolute-positioning code path.
+    _is_positioned: bool = PrivateAttr(default=False)
 
     model_config = {"populate_by_name": True}
 
@@ -145,11 +171,26 @@ class FieldStart(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-# REMOVED entirely: BookmarkStart, BookmarkEnd, CommentNode, FootnoteNode
+class BookmarkStart(BaseModel):
+    """Marks the beginning of a Word bookmark (``<w:bookmarkStart>``).
 
-InlineExtra = Union[ShapeNode, FieldStart]
+    The reader emits one of these for every named bookmark so the PDF
+    writer can register the anchor's page + Y position, turning
+    ``#name`` run-text references (hyperlinks, TOC entries) into real
+    clickable internal links.
+    """
 
-_KEPT_INLINE_TYPES = {"Shape", "FieldStart"}
+    type: str = Field("BookmarkStart", alias="_type")
+    name: str = ""
+
+    model_config = {"populate_by_name": True}
+
+
+# REMOVED entirely: BookmarkEnd, CommentNode, FootnoteNode
+
+InlineExtra = Union[ShapeNode, FieldStart, BookmarkStart]
+
+_KEPT_INLINE_TYPES = {"Shape", "FieldStart", "BookmarkStart"}
 
 
 # ─────────────────────────────────────────────
@@ -173,14 +214,14 @@ class Paragraph(BaseModel):
     @field_validator("inline_extras", mode="before")
     @classmethod
     def _keep_renderable_extras(cls, v: Any) -> list:
-        """Filter out non-renderable inline nodes (bookmarks, comments, etc.)."""
+        """Filter out non-renderable inline nodes (comments, etc.)."""
         if not isinstance(v, list):
             return v
         return [
             item
             for item in v
             if (isinstance(item, dict) and item.get("_type") in _KEPT_INLINE_TYPES)
-            or isinstance(item, (ShapeNode, FieldStart))
+            or isinstance(item, (ShapeNode, FieldStart, BookmarkStart))
         ]
 
 
@@ -460,5 +501,3 @@ class Document(BaseModel):
             for p in self.all_paragraphs
             if p.paragraph_format.is_heading and p.paragraph_format.outline_level < max_level
         ]
-
-

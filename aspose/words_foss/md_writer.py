@@ -9,7 +9,10 @@ exclusively by the Pydantic model classes defined in
 from __future__ import annotations
 
 import base64
+import html
+import os
 import re
+from pathlib import Path
 from typing import Optional
 
 from aspose.words_foss import light_document_model as ldm
@@ -35,15 +38,25 @@ class LdmMarkdownWriter:
         self.options = options or ConversionOptions()
         self._list_counters: dict[tuple[int, int], int] = {}
         self._doc: Optional[ldm.Document] = None
+        self._output_path: Optional[Path] = None
+        self._image_counter: int = 0
+        self._reference_links: list[tuple[str, str]] = []  # (label, url)
 
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
 
-    def write(self, doc: ldm.Document) -> str:
+    def write(
+        self,
+        doc: ldm.Document,
+        output_path: Optional[Path] = None,
+    ) -> str:
         """Convert *doc* to Markdown and return the result string."""
         self._list_counters.clear()
+        self._reference_links.clear()
+        self._image_counter = 0
         self._doc = doc
+        self._output_path = output_path
         blocks: list[tuple[str, str]] = []  # (tag, markdown_text)
 
         # Header images
@@ -70,7 +83,14 @@ class LdmMarkdownWriter:
                 if isinstance(item, ldm.ShapeNode) and item.has_image and item.image_data:
                     blocks.append((self._BLOCK, self._render_image(item)))
 
-        return self._join_blocks(blocks)
+        result = self._join_blocks(blocks)
+
+        # Append reference-style link definitions if any were collected
+        if self._reference_links:
+            defs = "\n".join(f"[{label}]: {url}" for label, url in self._reference_links)
+            result = result.rstrip("\n") + "\n\n" + defs + "\n"
+
+        return result
 
     # ------------------------------------------------------------------
     # Block joining
@@ -123,8 +143,46 @@ class LdmMarkdownWriter:
         """Render a ShapeNode with image data as a Markdown inline image tag."""
         img = shape.image_data
         assert img is not None
+
+        # If images_folder is set, save to file instead of base64
+        if self.options.images_folder and not self.options.export_images_as_base64:
+            self._image_counter += 1
+            ext = self._guess_image_extension(img.content_type, img.source_filename)
+            # Sanitize filename to prevent path traversal
+            filename = Path(img.source_filename).name if img.source_filename else ""
+            filename = filename or f"image{self._image_counter}{ext}"
+            folder = Path(self.options.images_folder)
+            folder.mkdir(parents=True, exist_ok=True)
+            filepath = folder / filename
+            filepath.write_bytes(img.image_bytes)
+
+            # Use alias if set, otherwise compute relative path
+            if self.options.images_folder_alias:
+                url = f"{self.options.images_folder_alias.rstrip('/')}/{filename}"
+            elif self._output_path is not None:
+                url = os.path.relpath(filepath, self._output_path.parent)
+            else:
+                url = str(filepath)
+            return f"![{img.source_filename}]({url})"
+
+        # Default: inline base64 data URI
         b64 = base64.b64encode(img.image_bytes).decode("ascii")
         return f"![{img.source_filename}](data:{img.content_type};base64,{b64})"
+
+    @staticmethod
+    def _guess_image_extension(content_type: str, filename: str) -> str:
+        """Determine file extension from content type or filename."""
+        if filename and "." in filename:
+            return ""  # filename already has extension
+        mime_map = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/gif": ".gif",
+            "image/bmp": ".bmp",
+            "image/svg+xml": ".svg",
+            "image/tiff": ".tiff",
+        }
+        return mime_map.get(content_type, ".png")
 
     def _is_list_paragraph(self, para: ldm.Paragraph) -> bool:
         """Return True if this paragraph is a list item."""
@@ -132,7 +190,12 @@ class LdmMarkdownWriter:
 
     def _convert_paragraph_tagged(self, para: ldm.Paragraph) -> tuple[str, Optional[str]]:
         """Convert a paragraph and return (block_tag, markdown_text)."""
-        tag = self._LIST if self._is_list_paragraph(para) else self._BLOCK
+        is_list = self._is_list_paragraph(para)
+        # In plain_text list mode, list items are regular blocks (no tight list)
+        if is_list and self.options.list_export_mode == "plain_text":
+            tag = self._BLOCK
+        else:
+            tag = self._LIST if is_list else self._BLOCK
         md = self._convert_paragraph(para)
         return tag, md
 
@@ -143,6 +206,15 @@ class LdmMarkdownWriter:
         # Horizontal rule takes precedence over everything else
         if self._is_horizontal_rule(para):
             return "---"
+
+        # Handle empty paragraphs according to empty_paragraph_export_mode
+        if self._is_empty_paragraph(para):
+            mode = self.options.empty_paragraph_export_mode
+            if mode == "none":
+                return None
+            elif mode == "markdown_hard_line_break":
+                return "\\"
+            # "empty_line" is the default — returns ""
 
         is_code_block = bool(style_name and ("Code" in style_name or "code" in style_name))
 
@@ -157,7 +229,7 @@ class LdmMarkdownWriter:
             def _flush_runs() -> None:
                 if not pending_runs:
                     return
-                text = self._convert_runs(pending_runs, is_code_block)
+                text = self._convert_runs(pending_runs, is_code_block, para)
                 pending_runs.clear()
                 if text:
                     formatted = self._format_text_part(text, pf, style_name, is_code_block, para)
@@ -188,7 +260,7 @@ class LdmMarkdownWriter:
             if isinstance(item, ldm.ShapeNode) and item.has_image and item.image_data is not None
         ]
 
-        text = self._convert_runs(para.runs, is_code_block)
+        text = self._convert_runs(para.runs, is_code_block, para)
         text_part = (
             self._format_text_part(text, pf, style_name, is_code_block, para) if text else None
         )
@@ -229,6 +301,22 @@ class LdmMarkdownWriter:
     # Horizontal rule detection
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_empty_paragraph(para: ldm.Paragraph) -> bool:
+        """Return True if the paragraph has no visible content."""
+        if para.runs and any(r.text and r.text.strip() for r in para.runs):
+            return False
+        if para.content_sequence and any(
+            isinstance(i, ldm.ShapeNode) for i in para.content_sequence
+        ):
+            return False
+        if para.inline_extras and any(
+            isinstance(i, ldm.ShapeNode) and i.has_image for i in para.inline_extras
+        ):
+            return False
+        text = para.text.strip() if para.text else ""
+        return not text
+
     def _is_horizontal_rule(self, para: ldm.Paragraph) -> bool:
         pf = para.paragraph_format
 
@@ -249,16 +337,65 @@ class LdmMarkdownWriter:
     # Run conversion
     # ------------------------------------------------------------------
 
-    def _convert_runs(self, runs: list[ldm.Run], is_code_block: bool) -> str:
+    # Regex for pre-rendered inline links: [text](url)
+    _INLINE_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+
+    def _convert_runs(
+        self,
+        runs: list[ldm.Run],
+        is_code_block: bool,
+        para: Optional[ldm.Paragraph] = None,
+    ) -> str:
+        # When the paragraph style itself defines bold/italic, suppress those
+        # markers on runs so Markdown doesn't double-apply emphasis.
+        style_bold, style_italic = self._get_style_emphasis(para)
+
         parts: list[str] = []
         for run in runs:
             text = run.text or ""
             if not text:
                 continue
             fmt = self._get_run_formatting(run)
+            if style_bold and fmt.bold:
+                fmt.bold = False
+            if style_italic and fmt.italic:
+                fmt.italic = False
             formatted = self._apply_formatting(text, fmt, is_code_block)
             parts.append(formatted)
-        return "".join(parts)
+        result = "".join(parts)
+
+        # Transform links based on link_export_mode
+        if self.options.link_export_mode == "reference":
+            result = self._convert_links_to_reference(result)
+
+        return result
+
+    def _get_style_emphasis(self, para: Optional[ldm.Paragraph]) -> tuple[bool, bool]:
+        """Return (bold, italic) defined by the paragraph's style font.
+
+        Looks up the style in the document's styles list and checks its
+        font properties.  This lets us suppress emphasis inherited from the
+        style rather than applied as direct run formatting.
+        """
+        if para is None or self._doc is None:
+            return False, False
+        style_name = para.paragraph_format.style_name
+        if not style_name:
+            return False, False
+        style = self._doc.find_style(style_name)
+        if style is None or style.font is None:
+            return False, False
+        return style.font.bold, style.font.italic
+
+    def _convert_links_to_reference(self, text: str) -> str:
+        """Convert inline links [text](url) to reference-style [text][N]."""
+
+        def _replace(m: re.Match) -> str:
+            label = str(len(self._reference_links) + 1)
+            self._reference_links.append((label, m.group(2)))
+            return f"[{m.group(1)}][{label}]"
+
+        return self._INLINE_LINK_RE.sub(_replace, text)
 
     def _get_run_formatting(self, run: ldm.Run) -> RunFormatting:
         f = run.font
@@ -357,6 +494,11 @@ class LdmMarkdownWriter:
         level = lf.list_level_number
         list_id = lf.list_id
 
+        # Plain text list mode: render as indented text without markers
+        if self.options.list_export_mode == "plain_text":
+            indent = "    " * level
+            return f"{indent}{text}"
+
         list_type, marker = self._get_list_type(list_id, level)
         indent = "  " * level
         return f"{indent}{marker} {text}"
@@ -398,6 +540,10 @@ class LdmMarkdownWriter:
         if not table.rows:
             return ""
 
+        # export_as_html: render table as raw HTML
+        if self.options.export_as_html == "tables":
+            return self._convert_table_as_html(table)
+
         # Determine number of columns
         num_cols = max(len(row.cells) for row in table.rows)
 
@@ -407,7 +553,7 @@ class LdmMarkdownWriter:
             row_cells: list[tuple[str, str]] = []
             for cell in row.cells:
                 text = self._extract_cell_text(cell)
-                align = self._cell_alignment(cell)
+                align = self._resolve_cell_alignment(cell)
                 row_cells.append((text, align))
             cell_data.append(row_cells)
 
@@ -489,3 +635,27 @@ class LdmMarkdownWriter:
             a = cell.paragraphs[0].paragraph_format.alignment
             return _ALIGN_STR.get(a, "left")
         return "left"
+
+    def _resolve_cell_alignment(self, cell: ldm.Cell) -> str:
+        """Return cell alignment, respecting table_content_alignment override."""
+        override = self.options.table_content_alignment
+        if override and override != "auto":
+            return override
+        return self._cell_alignment(cell)
+
+    def _convert_table_as_html(self, table: ldm.Table) -> str:
+        """Render a table as raw HTML."""
+        lines: list[str] = ["<table>"]
+        for i, row in enumerate(table.rows):
+            lines.append("<tr>")
+            tag = "th" if i == 0 else "td"
+            for cell in row.cells:
+                text = html.escape(self._extract_cell_text(cell))
+                align = self._resolve_cell_alignment(cell)
+                if align != "left":
+                    lines.append(f'<{tag} style="text-align: {align}">{text}</{tag}>')
+                else:
+                    lines.append(f"<{tag}>{text}</{tag}>")
+            lines.append("</tr>")
+        lines.append("</table>")
+        return "\n".join(lines)

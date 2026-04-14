@@ -41,6 +41,14 @@ class ConversionOptions:
     table_pipe_style: bool = True
     wrap_width: Optional[int] = None
     escape_special_chars: bool = True
+    table_content_alignment: str = "auto"
+    list_export_mode: str = "markdown_syntax"
+    link_export_mode: str = "auto"
+    export_as_html: str = "none"
+    empty_paragraph_export_mode: str = "empty_line"
+    export_images_as_base64: bool = False
+    images_folder: str = ""
+    images_folder_alias: str = ""
 
 
 @dataclass
