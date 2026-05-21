@@ -4,8 +4,6 @@ Provides a common Protocol defining the reader interface and a factory
 function that returns the appropriate reader for a given file extension.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
 from typing import BinaryIO, Protocol, Union, runtime_checkable
 

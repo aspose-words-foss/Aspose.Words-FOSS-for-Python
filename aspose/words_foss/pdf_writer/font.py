@@ -1,17 +1,48 @@
 """Font application and reset helpers for the PDF writer."""
 
-from __future__ import annotations
 
 from fpdf import FPDF
 
 from aspose.words_foss import light_document_model as ldm
 from aspose.words_foss.pdf_writer.color import set_text_color
 from aspose.words_foss.pdf_writer.constants import (
-    CALIBRI_COMPAT_FAMILIES,
-    CALIBRI_TO_HELVETICA_RATIO,
+    CORE_FAMILY_X_HEIGHT,
     DEFAULT_FONT_NAME,
     DEFAULT_FONT_SIZE_PT,
+    FONT_X_HEIGHT_MAP,
+    FPDF_FONT_FAMILY_MAP,
 )
+
+
+def _resolve_fpdf_family(font_name: str) -> str:
+    """Pick the closest fpdf2 core family for an LDM font name."""
+    name_lower = font_name.lower()
+    if not name_lower:
+        return DEFAULT_FONT_NAME
+    for triggers, family in FPDF_FONT_FAMILY_MAP:
+        if any(t in name_lower for t in triggers):
+            return family
+    return DEFAULT_FONT_NAME
+
+
+def _source_xheight(name_lower: str) -> int | None:
+    for triggers, xheight in FONT_X_HEIGHT_MAP:
+        if any(t in name_lower for t in triggers):
+            return xheight
+    return None
+
+
+def _size_ratio(name_lower: str, target_family: str) -> float:
+    """Scale factor to apply when rendering ``name_lower`` as ``target_family``.
+
+    Matches the source font's x-height against the target family's, so the
+    rendered glyph height stays visually close to the requested font.
+    """
+    src = _source_xheight(name_lower)
+    tgt = CORE_FAMILY_X_HEIGHT.get(target_family)
+    if src is None or not tgt:
+        return 1.0
+    return src / tgt
 
 
 def apply_run_font(pdf: FPDF, font: ldm.Font, default_size: float = DEFAULT_FONT_SIZE_PT) -> str:
@@ -26,16 +57,9 @@ def apply_run_font(pdf: FPDF, font: ldm.Font, default_size: float = DEFAULT_FONT
 
     size = font.size if font.size > 0 else default_size
 
-    # Use Courier for monospace font names
-    font_name = DEFAULT_FONT_NAME
     name_lower = (font.name or "").lower()
-    if name_lower and any(kw in name_lower for kw in ("courier", "mono", "consolas", "menlo")):
-        font_name = "Courier"
-    elif any(fam in name_lower for fam in CALIBRI_COMPAT_FAMILIES):
-        # Helvetica has a bigger x-height than Calibri; shrink the
-        # nominal size so substituted runs match the original's
-        # visual footprint (header vs. footer balance in particular).
-        size *= CALIBRI_TO_HELVETICA_RATIO
+    font_name = _resolve_fpdf_family(name_lower)
+    size *= _size_ratio(name_lower, font_name)
 
     pdf.set_font(font_name, style=style, size=size)
 

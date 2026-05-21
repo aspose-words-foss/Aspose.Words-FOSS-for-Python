@@ -1,10 +1,8 @@
-"""Border-related enums mirroring Aspose.Words."""
+"""Border-related enums."""
 
 
 class LineStyle:
     """Specifies line style of a border.
-
-    Mirrors ``Aspose.Words.LineStyle``.
     """
 
     NONE = 0

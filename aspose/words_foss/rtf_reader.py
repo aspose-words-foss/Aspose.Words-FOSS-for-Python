@@ -6,20 +6,17 @@ Word 97-2003 binary format (OLE2). This reader delegates to DocFileReader
 for parsing, providing transparent RTF support alongside DOC and DOCX.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
-from typing import Optional, Union, BinaryIO, Iterator, TYPE_CHECKING
+from typing import Optional, Union, BinaryIO, Iterator
 
 from aspose.words_foss.doc_reader import DocFileReader
+from aspose.words_foss import light_document_model as ldm
 from aspose.words_foss.docx_reader import (
     ParagraphData,
     TableData,
     NumberingInfo,
 )
 
-if TYPE_CHECKING:
-    from aspose.words_foss import light_document_model as ldm
 
 
 class RtfFileReader:

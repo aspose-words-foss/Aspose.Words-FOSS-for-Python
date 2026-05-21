@@ -2,9 +2,8 @@
 LDM builder for DOC files — extends DocFileReaderCore with to_light_document().
 """
 
-from __future__ import annotations
-
-from typing import Optional, TYPE_CHECKING
+import struct
+from typing import Optional
 
 # -- unit conversion constants ------------------------------------------------
 _PT_PER_INCH = 72.0
@@ -26,50 +25,105 @@ _A4_HEIGHT_PT = 841.89
 # -- default font size --------------------------------------------------------
 _DEFAULT_FONT_SIZE_PT = 10.0
 
-if TYPE_CHECKING:
-    from aspose.words_foss import light_document_model as ldm
+# -- list-paragraph defaults --------------------------------------------------
+# Word's default bullet/number list uses 36pt left-indent per level and a
+# 18pt hanging first-line indent — the same defaults Aspose.Words returns
+# from a paragraph's ``paragraph_format`` when the PAPX has no explicit
+# indent SPRMs but the paragraph is part of a list.
+_LIST_DEFAULT_LEVEL_INDENT_PT = 36.0
+_LIST_DEFAULT_HANGING_PT = 18.0
 
-from aspose.words_foss.doc_reader.constants import ESCHER_BLIP_JPEG, ESCHER_BLIP_JPEG2
+
+from aspose.words_foss.doc_reader.constants import (
+    ESCHER_BLIP_JPEG,
+    ESCHER_BLIP_JPEG2,
+    is_raster_blip,
+)
 from aspose.words_foss.doc_reader.doc_file_reader_core import DocFileReaderCore
 from aspose.words_foss.doc_reader.images import ShapeAnchor
 from aspose.words_foss.doc_reader.properties import CharProps, ParaProps
+from aspose.words_foss.doc_reader.table_builder import DocTableBuilderMixin
 from aspose.words_foss.doc_reader.text import clean_control_chars, evaluate_fields
+from aspose.words_foss.model.style_identifiers import (
+    IDENTIFIER_TO_STYLE_ID,
+    resolve_style_identifier,
+)
 from aspose.words_foss.model.wrap_type import WrapType
-from aspose.words_foss.model.enums import NumberStyle, ParagraphAlignment, StyleType
+from aspose.words_foss.model.enums import NumberStyle, ParagraphAlignment, SectionStart, StyleType
+from aspose.words_foss import light_document_model as ldm
 
 
-class DocFileReader(DocFileReaderCore):
+class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
     """Full DOC reader with LDM (Light Document Model) building capability."""
 
     def to_light_document(self) -> ldm.Document:
-        from aspose.words_foss import light_document_model as ldm
-
         doc = ldm.Document()
         doc.styles = self._build_ldm_styles()
         doc.lists = self._build_ldm_lists()
 
-        sec = ldm.Section()
-        sec.page_setup = self._build_ldm_page_setup()
         body_children = self._build_ldm_body_children()
 
         if self._ccp_txbx > 0:
             self._inject_textbox_content(body_children)
 
-        sec.body = ldm.Body(children=body_children)
-        doc.sections = [sec]
+        if len(self._section_props) > 1 and len(self._section_cps) > 1:
+            doc.sections = self._split_into_sections(body_children)
+        else:
+            sec = ldm.Section()
+            sec.page_setup = self._build_ldm_page_setup(0)
+            sec.body = ldm.Body(children=body_children)
+            doc.sections = [sec]
 
         hdr, ftr = self._build_ldm_headers_footers()
         doc.header_paragraphs = hdr
         doc.footer_paragraphs = ftr
         return doc
 
+    def _split_into_sections(self, body_children: list) -> list[ldm.Section]:
+        """Split body children into sections based on section boundary CPs."""
+        sections: list[ldm.Section] = []
+        n_sections = len(self._section_props)
+
+        # Build CP→paragraph index mapping from the child paragraphs' CPs.
+        child_cp_starts: list[int] = []
+        for child in body_children:
+            cp = getattr(child, "_cell_cp", getattr(child, "_cp_start", -1))
+            child_cp_starts.append(cp)
+
+        sec_boundaries = self._section_cps[1:]  # skip CP[0]=0
+
+        child_idx = 0
+        for sec_i in range(n_sections):
+            sec = ldm.Section()
+            sec.page_setup = self._build_ldm_page_setup(sec_i)
+            sec_children: list = []
+
+            if sec_i < len(sec_boundaries):
+                boundary_cp = sec_boundaries[sec_i]
+            else:
+                boundary_cp = self._ccp_text + 1
+
+            while child_idx < len(body_children):
+                cp = child_cp_starts[child_idx]
+                if cp >= 0 and cp >= boundary_cp:
+                    break
+                sec_children.append(body_children[child_idx])
+                child_idx += 1
+
+            sec.body = ldm.Body(children=sec_children)
+            sections.append(sec)
+
+        # Any remaining children go to the last section
+        if child_idx < len(body_children) and sections:
+            sections[-1].body.children.extend(body_children[child_idx:])
+
+        return sections
+
     # -- page setup -----------------------------------------------------------
 
-    def _build_ldm_page_setup(self) -> ldm.PageSetup:
-        from aspose.words_foss import light_document_model as ldm
-
+    def _build_ldm_page_setup(self, sec_index: int = 0) -> ldm.PageSetup:
         ps = ldm.PageSetup()
-        props = self._section_props[0] if self._section_props else {}
+        props = self._section_props[sec_index] if sec_index < len(self._section_props) else {}
 
         ps.page_width = props.get("page_width", _DEFAULT_PAGE_WIDTH_PT)
         ps.page_height = props.get("page_height", _DEFAULT_PAGE_HEIGHT_PT)
@@ -79,11 +133,35 @@ class DocFileReader(DocFileReaderCore):
         ps.right_margin = props.get("right_margin", _DEFAULT_MARGIN_PT)
         ps.header_distance = props.get("header_distance", _DEFAULT_HEADER_FOOTER_DIST_PT)
         ps.footer_distance = props.get("footer_distance", _DEFAULT_HEADER_FOOTER_DIST_PT)
+        ps.gutter = props.get("gutter", 0.0)
         ps.different_first_page_header_footer = props.get("different_first_page", False)
         if props.get("restart_page_numbering"):
             ps.restart_page_numbering = True
             default_start = 0 if ps.different_first_page_header_footer else 1
             ps.page_starting_number = props.get("page_starting_number", default_start)
+
+        col_count = props.get("columns_count", 1)
+        if col_count > 1:
+            tc = ldm.TextColumns()
+            tc.count = col_count
+            tc.spacing = props.get("columns_spacing", 36.0)
+            tc.evenly_spaced = props.get("columns_evenly_spaced", True)
+            tc.line_between = props.get("columns_line_between", False)
+            ps.text_columns = tc
+
+        # Section break type (sprmSBkc): 0=continuous, 1=newColumn,
+        # 2=newPage, 3=evenPage, 4=oddPage
+        sbt = props.get("section_break_type", -1)
+        if sbt == 0:
+            ps.section_start = SectionStart.CONTINUOUS
+        elif sbt == 1:
+            ps.section_start = SectionStart.NEW_COLUMN
+        elif sbt == 2:
+            ps.section_start = SectionStart.NEW_PAGE
+        elif sbt == 3:
+            ps.section_start = SectionStart.EVEN_PAGE
+        elif sbt == 4:
+            ps.section_start = SectionStart.ODD_PAGE
 
         w, h = min(ps.page_width, ps.page_height), max(ps.page_width, ps.page_height)
         if abs(w - _LETTER_WIDTH_PT) < 2 and abs(h - _LETTER_HEIGHT_PT) < 2:
@@ -95,57 +173,134 @@ class DocFileReader(DocFileReaderCore):
     # -- styles & lists -------------------------------------------------------
 
     def _build_ldm_styles(self) -> list[ldm.Style]:
-        from aspose.words_foss import light_document_model as ldm
-
         styles: list[ldm.Style] = []
         for istd, name in self._styles.items():
             s = ldm.Style()
             s.name = name
             s.type = StyleType.PARAGRAPH
             sd = self._style_data.get(istd)
+            # ``sti`` matches the OOXML StyleIdentifier enum 1:1; 0x0FFF
+            # / 0x0FFE are sentinels with no identifier, fall back to a
+            # name-based lookup.
+            sid = -1
+            if sd is not None and sd.sti not in (0x0FFF, 0x0FFE):
+                if sd.sti in IDENTIFIER_TO_STYLE_ID:
+                    sid = sd.sti
+            if sid < 0:
+                sid = resolve_style_identifier(name, name)
+            if sid >= 0:
+                s.style_identifier = sid
+                s.built_in = True
             if sd and 1 <= sd.sti <= 9:
                 s.is_heading = True
                 pf = ldm.ParagraphFormat()
                 pf.style_name = name
                 pf.is_heading = True
                 pf.outline_level = sd.sti - 1
+                if sid >= 0:
+                    pf.style_identifier = sid
                 s.paragraph_format = pf
+            # Resolve the effective rPr font for paragraph-style slots
+            # (stk=0/1) — character styles already expose their CHP.
+            if sd is not None and sd.stk in (0, 1):
+                resolved_cp = self._resolve_char_props(istd)
+                font = self._build_ldm_font(resolved_cp)
+                if (font.name or font.size or font.bold or font.italic
+                        or font.underline or font.color):
+                    s.font = font
             styles.append(s)
         return styles
 
-    def _build_ldm_lists(self) -> list[ldm.DocList]:
-        from aspose.words_foss import light_document_model as ldm
+    # LVLF.nfc → LDM NumberStyle (matches the OOXML w:numFmt enum).
+    _NFC_TO_NUMBER_STYLE = {
+        0: NumberStyle.ARABIC,
+        1: NumberStyle.UPPERCASE_ROMAN,
+        2: NumberStyle.LOWERCASE_ROMAN,
+        3: NumberStyle.UPPERCASE_LETTER,
+        4: NumberStyle.LOWERCASE_LETTER,
+        5: NumberStyle.ORDINAL,
+        22: NumberStyle.LEADING_ZERO,
+        23: NumberStyle.BULLET,
+        255: NumberStyle.NONE,
+    }
 
+    # LVLF.ixchFollow → OOXML <w:suff>: 0=tab, 1=space, 2=nothing.
+    _FOLLOW_TO_TRAILING = {0: 0, 1: 1, 2: 2}
+
+    def _build_ldm_lists(self) -> list[ldm.DocList]:
         lists: list[ldm.DocList] = []
         for lsid, list_def in self._list_defs.items():
             dl = ldm.DocList()
             dl.list_id = lsid
-            dl.is_multi_level = False
-            ll = ldm.ListLevel()
-            if list_def.is_hybrid:
-                ll.number_style = NumberStyle.BULLET
+            dl.is_multi_level = not list_def.is_simple and len(list_def.levels) > 1
+            if list_def.levels:
+                dl.levels = [self._level_data_to_ldm(lvl) for lvl in list_def.levels]
             else:
-                ll.number_style = NumberStyle.ARABIC
-                ll.number_format = "%1."
-            dl.levels = [ll]
+                ll = ldm.ListLevel()
+                ll.number_style = (
+                    NumberStyle.BULLET if list_def.is_hybrid else NumberStyle.ARABIC
+                )
+                if ll.number_style == NumberStyle.ARABIC:
+                    ll.number_format = "%1."
+                dl.levels = [ll]
             lists.append(dl)
         return lists
+
+    def _level_data_to_ldm(self, lvl) -> ldm.ListLevel:
+        """Convert a binary ``ListLevelData`` into an LDM ``ListLevel``."""
+        ll = ldm.ListLevel()
+        ll.number_style = self._NFC_TO_NUMBER_STYLE.get(lvl.nfc, NumberStyle.ARABIC)
+        ll.number_format = lvl.lvl_text
+        ll.start_at = max(1, lvl.start_at)
+        ll.alignment = lvl.alignment
+        ll.text_position = lvl.left_indent_pt
+        ll.number_position = lvl.left_indent_pt + lvl.first_line_indent_pt
+        ll.trailing_character = self._FOLLOW_TO_TRAILING.get(lvl.follow, 0)
+
+        if lvl.font_index >= 0 or lvl.font_size_pt > 0 or lvl.bold or lvl.italic:
+            f = ldm.Font()
+            if lvl.font_index >= 0 and lvl.font_index in self._fonts:
+                f.name = self._fonts[lvl.font_index]
+            if lvl.font_size_pt > 0:
+                f.size = lvl.font_size_pt
+            f.bold = lvl.bold
+            f.italic = lvl.italic
+            ll.font = f
+        return ll
+
+    def _resolve_list_level(self, ilfo: int, ilvl: int):
+        """Look up the binary ``ListLevelData`` for an (ilfo, ilvl) pair.
+
+        Returns ``None`` if the LFO doesn't resolve to a known list,
+        the list has no parsed levels, or the requested level is out
+        of range — the caller then falls back to Word's defaults.
+        """
+        lsid = self._lfo_map.get(ilfo)
+        if lsid is None:
+            return None
+        list_def = self._list_defs.get(lsid)
+        if list_def is None or not list_def.levels:
+            return None
+        # Simple (single-level) lists collapse every ilvl onto the
+        # single LVL block.
+        if list_def.is_simple:
+            return list_def.levels[0]
+        if 0 <= ilvl < len(list_def.levels):
+            return list_def.levels[ilvl]
+        return None
 
     # -- coordinate helpers ----------------------------------------------------
 
     def _spa_to_page_mm(self, anchor: ShapeAnchor) -> tuple[float, float]:
         """Convert SPA anchor left/top to absolute page position in mm.
 
-        Uses bx/by flags to determine the coordinate reference:
-        bx: 0=margin-relative, 1=page-absolute, 2=char-relative (≈margin)
-        by: 0=margin-relative, 1=page-absolute, 2=paragraph-relative (≈margin)
+        ``bx`` / ``by`` = 1 means the coordinate is already page-absolute;
+        anything else is treated as margin-relative.
         """
         props = self._section_props[0] if self._section_props else {}
         ml = props.get("left_margin", _DEFAULT_MARGIN_PT)
         mt = props.get("top_margin", _DEFAULT_MARGIN_PT)
-        # bx=1 → coordinate is already page-absolute
         x_pt = anchor.left if anchor.bx == 1 else ml + anchor.left
-        # by=1 → coordinate is already page-absolute
         y_pt = anchor.top if anchor.by == 1 else mt + anchor.top
         return x_pt * _PT_TO_MM, y_pt * _PT_TO_MM
 
@@ -164,14 +319,14 @@ class DocFileReader(DocFileReaderCore):
     def _build_image_shape(
         self, anchor: ShapeAnchor, positioned: bool = False
     ) -> Optional[ldm.ShapeNode]:
-        from aspose.words_foss import light_document_model as ldm
-
         pib = self._shape_blip_map.get(anchor.spid)
         if not pib or pib < 1 or pib > len(self._blips):
             return None
         blip = self._blips[pib - 1]
         img_bytes = self._wd_bytes[blip.img_offset : blip.img_offset + blip.img_size]
-        if not img_bytes:
+        # BLIPSTORE can hold WMF/EMF/PICT/placeholder bytes the writers
+        # can't decode — drop anything that isn't a real raster.
+        if not is_raster_blip(blip.blip_type, img_bytes):
             return None
 
         content_type = "image/png"
@@ -190,16 +345,188 @@ class DocFileReader(DocFileReaderCore):
             shape.is_inline = False
             shape.wrap_type = WrapType.NONE
         else:
-            # SPA-anchored images are floating, not inline.
             shape.is_inline = False
             shape.wrap_type = self._SPA_WR_MAP.get(anchor.wr, WrapType.SQUARE)
         return shape
 
+    # -- inline pictures (fSpec + PicLocation in Data stream) -----------------
+
+    def _parse_inline_picture(self, pic_location: int) -> Optional[ldm.ShapeNode]:
+        data = self._data_stream_bytes
+        if not data or pic_location < 0:
+            return None
+        offset = pic_location
+        if offset + 68 > len(data):
+            return None
+
+        lcb = struct.unpack_from("<I", data, offset)[0]
+        cb_header = struct.unpack_from("<H", data, offset + 4)[0]
+        if cb_header < 68 or offset + lcb > len(data):
+            return None
+
+        pic_data_start = offset + cb_header
+        pic_data_end = offset + lcb
+
+        # Prefer the blip embedded directly in the PICF data — it carries
+        # the actual inline image.  Fall back to the BSE blip table only
+        # when no embedded blip exists (some DOC files store a pib
+        # reference without an inline copy).
+        img_bytes = self._find_blip_in_picf(data, pic_data_start, pic_data_end)
+        if not img_bytes:
+            pib = self._find_pib_in_picf(data, pic_data_start, pic_data_end)
+            if pib is not None and 1 <= pib <= len(self._blips):
+                blip = self._blips[pib - 1]
+                img_bytes = self._wd_bytes[blip.img_offset:blip.img_offset + blip.img_size]
+
+        # ``blip_type=0`` here means "unknown / signature only" — let
+        # the magic-byte sniff inside ``is_raster_blip`` decide.  PICF
+        # blocks for WMF / EMF inline pictures land here too, and the
+        # writers can't draw them.
+        if not is_raster_blip(0, img_bytes):
+            return None
+
+        content_type = "image/png"
+        if img_bytes[:2] == b"\xff\xd8":
+            content_type = "image/jpeg"
+
+        mfp_mm = struct.unpack_from("<h", data, offset + 6)[0]
+        dxa_goal = struct.unpack_from("<H", data, offset + 14)[0]
+        dya_goal = struct.unpack_from("<H", data, offset + 16)[0]
+        mx = struct.unpack_from("<H", data, offset + 18)[0]
+        my = struct.unpack_from("<H", data, offset + 20)[0]
+
+        if mfp_mm == 100:
+            dim_w = struct.unpack_from("<H", data, offset + 28)[0]
+            dim_h = struct.unpack_from("<H", data, offset + 30)[0]
+            if dim_w > 0 and dim_h > 0:
+                width_pt = dim_w / 20.0
+                height_pt = dim_h / 20.0
+            else:
+                width_pt = self._get_image_width_pt(img_bytes)
+                height_pt = self._get_image_height_pt(img_bytes)
+        elif dxa_goal > 0 and mx > 0:
+            width_pt = dxa_goal * mx / 1000.0 / 20.0
+            height_pt = (dya_goal * my / 1000.0 / 20.0) if (dya_goal > 0 and my > 0) else self._get_image_height_pt(img_bytes)
+        else:
+            width_pt = self._get_image_width_pt(img_bytes)
+            height_pt = self._get_image_height_pt(img_bytes)
+
+        shape = ldm.ShapeNode()
+        shape.has_image = True
+        shape.is_inline = True
+        shape.width = width_pt
+        shape.height = height_pt
+        shape.image_data = ldm.ImageData(content_type=content_type, image_bytes=img_bytes)
+        return shape
+
+    @staticmethod
+    def _find_pib_in_picf(data: bytes, start: int, end: int) -> Optional[int]:
+        pos = start
+        while pos + 8 <= end:
+            ver_inst = struct.unpack_from("<H", data, pos)[0]
+            fbt = struct.unpack_from("<H", data, pos + 2)[0]
+            rec_len = struct.unpack_from("<I", data, pos + 4)[0]
+            ver = ver_inst & 0xF
+
+            if ver == 0xF:
+                result = DocFileReader._find_pib_in_picf(data, pos + 8, pos + 8 + rec_len)
+                if result is not None:
+                    return result
+                pos += 8 + rec_len
+                continue
+
+            if fbt == 0xF00B:
+                num_props = (ver_inst >> 4) & 0xFFF
+                prop_offset = pos + 8
+                for _ in range(num_props):
+                    if prop_offset + 6 > end:
+                        break
+                    pid_flags = struct.unpack_from("<H", data, prop_offset)[0]
+                    pid = pid_flags & 0x3FFF
+                    val = struct.unpack_from("<I", data, prop_offset + 2)[0]
+                    if pid == 0x0104:
+                        return val
+                    prop_offset += 6
+
+            pos += 8 + rec_len
+        return None
+
+    @staticmethod
+    def _find_blip_in_picf(data: bytes, start: int, end: int) -> Optional[bytes]:
+        pos = start
+        while pos + 8 <= end:
+            ver_inst = struct.unpack_from("<H", data, pos)[0]
+            fbt = struct.unpack_from("<H", data, pos + 2)[0]
+            rec_len = struct.unpack_from("<I", data, pos + 4)[0]
+            ver = ver_inst & 0xF
+
+            if ver == 0xF:
+                result = DocFileReader._find_blip_in_picf(data, pos + 8, pos + 8 + rec_len)
+                if result is not None:
+                    return result
+                pos += 8 + rec_len
+                continue
+
+            if fbt == 0xF007:
+                bse_body_start = pos + 8 + 36
+                if bse_body_start + 8 <= end:
+                    return DocFileReader._find_blip_in_picf(data, bse_body_start, pos + 8 + rec_len)
+                pos += 8 + rec_len
+                continue
+
+            if 0xF01D <= fbt <= 0xF021:
+                inst = (ver_inst >> 4) & 0xFFF
+                uid_size = 32 if (inst & 1) else 16
+                tag_size = 1
+                img_start = pos + 8 + uid_size + tag_size
+                img_end = pos + 8 + rec_len
+                if img_start < img_end:
+                    return data[img_start:img_end]
+
+            pos += 8 + rec_len
+        return None
+
+    @staticmethod
+    def _get_image_width_pt(img_bytes: bytes) -> float:
+        if len(img_bytes) > 24 and img_bytes[:4] == b"\x89PNG":
+            w_px = struct.unpack_from(">I", img_bytes, 16)[0]
+            return w_px * 72.0 / 96.0
+        if len(img_bytes) > 2 and img_bytes[:2] == b"\xff\xd8":
+            return DocFileReader._jpeg_dimension(img_bytes, width=True)
+        return 200.0
+
+    @staticmethod
+    def _get_image_height_pt(img_bytes: bytes) -> float:
+        if len(img_bytes) > 24 and img_bytes[:4] == b"\x89PNG":
+            h_px = struct.unpack_from(">I", img_bytes, 20)[0]
+            return h_px * 72.0 / 96.0
+        if len(img_bytes) > 2 and img_bytes[:2] == b"\xff\xd8":
+            return DocFileReader._jpeg_dimension(img_bytes, width=False)
+        return 150.0
+
+    @staticmethod
+    def _jpeg_dimension(img_bytes: bytes, width: bool) -> float:
+        pos = 2
+        while pos + 4 < len(img_bytes):
+            if img_bytes[pos] != 0xFF:
+                break
+            marker = img_bytes[pos + 1]
+            if marker in (0xC0, 0xC1, 0xC2):
+                if pos + 9 <= len(img_bytes):
+                    h = struct.unpack_from(">H", img_bytes, pos + 5)[0]
+                    w = struct.unpack_from(">H", img_bytes, pos + 7)[0]
+                    val = w if width else h
+                    return val * 72.0 / 96.0
+                break
+            length = struct.unpack_from(">H", img_bytes, pos + 2)[0]
+            if length < 2:
+                break
+            pos += 2 + length
+        return 200.0 if width else 150.0
+
     # -- body children --------------------------------------------------------
 
     def _build_ldm_body_children(self) -> list:
-        from aspose.words_foss import light_document_model as ldm
-
         children: list = []
         text = self._text
         if not text:
@@ -226,11 +553,16 @@ class DocFileReader(DocFileReaderCore):
             pb = ldm.Paragraph()
             run = ldm.Run()
             run.text = "\f"
-            pb.runs = [run]
+            pb._children = [run]
             pb.text = "\f"
             return pb
 
-        first_page = True
+        # Cover-page mode: only when the document has textbox content,
+        # indicating a structured cover page with positioned shapes.
+        first_page = self._ccp_txbx > 0
+
+        # Build set of section boundary CPs for quick lookup.
+        sec_boundary_set = set(self._section_cps[1:]) if len(self._section_cps) > 1 else set()
 
         for p_start, p_end in paragraphs:
             para_text = text[p_start:p_end]
@@ -238,7 +570,8 @@ class DocFileReader(DocFileReaderCore):
             para_text_clean = para_text.replace("\x0c", "")
 
             if not clean_control_chars(para_text_clean).strip():
-                # Empty paragraphs may still carry image anchors.
+                # Empty paragraphs may still carry image anchors
+                # or inline pictures (fSpec 0x01 characters).
                 img_shapes = []
                 for pos in range(p_start, p_end):
                     anchor = self._cp_to_image_anchor.get(pos)
@@ -250,36 +583,79 @@ class DocFileReader(DocFileReaderCore):
                                 shape.width = anchor.width * _PT_TO_MM
                                 shape.height = anchor.height * _PT_TO_MM
                             img_shapes.append(shape)
+                    elif text[pos] == "\x01":
+                        char_ranges = self._get_char_props_in_range(pos, pos + 1)
+                        for _cs, _ce, cp in char_ranges:
+                            if cp.is_special and cp.pic_location >= 0:
+                                shape = self._parse_inline_picture(cp.pic_location)
+                                if shape:
+                                    img_shapes.append(shape)
 
                 if has_page_break:
                     pb = _make_page_break()
-                    pb.inline_extras.extend(img_shapes)
+                    pb._cp_start = p_start  # type: ignore[attr-defined]
+                    pb._children.extend(img_shapes)
                     children.append(pb)
                     first_page = False
                 elif img_shapes:
                     holder = ldm.Paragraph()
-                    holder.inline_extras.extend(img_shapes)
+                    holder._cp_start = p_start  # type: ignore[attr-defined]
+                    holder._children.extend(img_shapes)
                     children.append(holder)
+                else:
+                    raw = text[p_start:p_end]
+                    is_structural = (
+                        "\x07" in raw
+                        or p_start in self._cell_para_starts
+                        or p_end in self._section_cps
+                    )
+                    if not is_structural:
+                        empty_para = self._build_empty_paragraph(p_start)
+                        children.append(empty_para)
                 continue
 
+            # When a page break starts a paragraph that crosses a
+            # section boundary, emit the break first so the content
+            # paragraph receives a _cp_start inside the next section.
+            pb_at_start = has_page_break and para_text.startswith("\x0c")
+            content_cp = p_start
+            if pb_at_start:
+                at_sec_boundary = (p_start + 1) in sec_boundary_set
+                if at_sec_boundary:
+                    sep = self._build_empty_paragraph(p_start)
+                    children.append(sep)
+                else:
+                    pb = _make_page_break()
+                    pb._cp_start = p_start  # type: ignore[attr-defined]
+                    children.append(pb)
+                first_page = False
+                content_cp = p_start + 1
+
             if "\x07" in para_text_clean:
-                tbl, trailing = self._build_ldm_table_from_text(para_text_clean)
+                tbl, trailing = self._build_ldm_table_from_text(
+                    para_text, p_start, p_end
+                )
+                tbl._cp_start = content_cp  # type: ignore[attr-defined]
                 if tbl.rows:
-                    # Multi-paragraph cells: preceding body paragraphs
-                    # that were emitted as standalone children may
-                    # actually belong inside this table's first cell.
-                    # Collect them back up to a structural boundary.
                     self._absorb_preceding_into_table(tbl, children)
                     children.append(tbl)
+                    # DOCX requires a paragraph after a table; only emit a
+                    # stub when no trailing text already serves as one.
+                    if not trailing.strip():
+                        post_tbl = self._build_empty_paragraph(p_end - 1)
+                        children.append(post_tbl)
                 if trailing.strip():
                     trail_start = p_start + len(para_text) - len(trailing)
                     if "\x13" in trailing and "\x14" in trailing:
                         para = self._build_ldm_hyperlink_paragraph(trailing, trail_start, p_end)
                     else:
                         para = self._build_ldm_paragraph(trailing, trail_start, p_end)
+                    para._cp_start = trail_start  # type: ignore[attr-defined]
                     children.append(para)
-                if has_page_break:
-                    children.append(_make_page_break())
+                if has_page_break and not pb_at_start:
+                    pb = _make_page_break()
+                    pb._cp_start = p_start  # type: ignore[attr-defined]
+                    children.append(pb)
                     first_page = False
                 continue
 
@@ -288,8 +664,9 @@ class DocFileReader(DocFileReaderCore):
             else:
                 para = self._build_ldm_paragraph(para_text_clean, p_start, p_end)
 
-            # Tag with CP so _absorb_preceding_into_table can check.
-            para._cell_cp = p_start  # type: ignore[attr-defined]
+            # Tag with CP so _absorb_preceding_into_table and section split can work.
+            para._cell_cp = content_cp  # type: ignore[attr-defined]
+            para._cp_start = content_cp  # type: ignore[attr-defined]
 
             for pos in range(p_start, p_end):
                 anchor = self._cp_to_image_anchor.get(pos)
@@ -303,38 +680,57 @@ class DocFileReader(DocFileReaderCore):
                         if first_page:
                             shape.width = anchor.width * _PT_TO_MM
                             shape.height = anchor.height * _PT_TO_MM
-                        para.inline_extras.append(shape)
+                        para._children.append(shape)
+                elif text[pos] == "\x01":
+                    char_ranges = self._get_char_props_in_range(pos, pos + 1)
+                    for _cs, _ce, cp in char_ranges:
+                        if cp.is_special and cp.pic_location >= 0:
+                            shape = self._parse_inline_picture(cp.pic_location)
+                            if shape:
+                                para._children.append(shape)
 
             children.append(para)
-            if has_page_break:
-                children.append(_make_page_break())
+            if has_page_break and not pb_at_start:
+                pb = _make_page_break()
+                pb._cp_start = p_start  # type: ignore[attr-defined]
+                children.append(pb)
                 first_page = False
 
         return children
 
     # -- paragraph format -----------------------------------------------------
 
-    def _resolve_ldm_paragraph_format(self, props: ParaProps) -> ldm.ParagraphFormat:
-        from aspose.words_foss import light_document_model as ldm
+    # Paragraph fields that follow the simple "use direct, else style" rule.
+    _PARA_FORMAT_FIELDS = (
+        "alignment",
+        "left_indent",
+        "right_indent",
+        "first_line_indent",
+        "space_before",
+        "space_after",
+        "space_before_auto",
+        "space_after_auto",
+        "keep_with_next",
+        "keep_together",
+        "widow_control",
+        "suppress_auto_hyphens",
+        "suppress_line_numbers",
+        "add_space_between_far_east_and_alpha",
+        "add_space_between_far_east_and_digit",
+        "auto_adjust_right_indent",
+        "no_space_between_paragraphs_of_same_style",
+        "page_break_before",
+        "baseline_alignment",
+        "conditional_style",
+    )
 
+    def _resolve_ldm_paragraph_format(self, props: ParaProps) -> ldm.ParagraphFormat:
         style_name = self._styles.get(props.istd, "Normal")
         style_pp = self._resolve_para_props(props.istd)
         pf = ldm.ParagraphFormat()
         pf.style_name = style_name
 
-        _FIELDS = (
-            "alignment",
-            "left_indent",
-            "right_indent",
-            "first_line_indent",
-            "space_before",
-            "space_after",
-            "space_before_auto",
-            "space_after_auto",
-            "keep_with_next",
-            "page_break_before",
-        )
-        for field in _FIELDS:
+        for field in self._PARA_FORMAT_FIELDS:
             if field in props._set_fields:
                 setattr(pf, field, getattr(props, field))
             else:
@@ -361,13 +757,68 @@ class DocFileReader(DocFileReaderCore):
 
         if props.ilfo > 0:
             pf.is_list_item = True
+            # Bullet/number paragraphs inherit indent from the list
+            # level's npos / tpos unless the PAPX overrides them.
+            li_from_papx = "left_indent" in props._set_fields
+            fli_from_papx = "first_line_indent" in props._set_fields
+            level = self._resolve_list_level(props.ilfo, props.ilvl)
+            if level is not None and (level.left_indent_pt or level.first_line_indent_pt):
+                if not li_from_papx:
+                    pf.left_indent = level.left_indent_pt
+                if not fli_from_papx:
+                    pf.first_line_indent = level.first_line_indent_pt
+            else:
+                if not li_from_papx:
+                    pf.left_indent = (props.ilvl + 1) * _LIST_DEFAULT_LEVEL_INDENT_PT
+                if not fli_from_papx:
+                    pf.first_line_indent = -_LIST_DEFAULT_HANGING_PT
+
+        raw_tabs = props.tab_stops if props.tab_stops else style_pp.tab_stops
+        if raw_tabs:
+            tc = ldm.TabStopCollection()
+            for pos_pt, align, leader in raw_tabs:
+                tc.tab_stops.append(ldm.TabStop(
+                    position=pos_pt, alignment=align, leader=leader,
+                ))
+            pf.tab_stops = tc
+
+        # Paragraph borders — merge direct over style on a per-side basis.
+        merged_borders = list(style_pp.borders)
+        for i, b in enumerate(props.borders):
+            if b is not None:
+                merged_borders[i] = b
+        if any(b is not None for b in merged_borders):
+            pf.borders = [
+                ldm.Border(
+                    line_style=b[0],
+                    line_width=b[1],
+                    color=b[2],
+                ) if b is not None else ldm.Border()
+                for b in merged_borders
+            ]
+
+        shading_back = (
+            props.shading_back
+            if "shading_back" in props._set_fields
+            else style_pp.shading_back
+        )
+        if shading_back:
+            pf.shading = ldm.Shading(background_pattern_color=shading_back)
+
         return pf
 
     # -- paragraph & run builders ---------------------------------------------
 
-    def _build_ldm_paragraph(self, para_text: str, p_start: int, p_end: int) -> ldm.Paragraph:
-        from aspose.words_foss import light_document_model as ldm
+    def _build_empty_paragraph(self, cp: int) -> ldm.Paragraph:
+        """Build an empty paragraph whose format is resolved through the style chain at *cp*."""
+        para = ldm.Paragraph()
+        para._cp_start = cp  # type: ignore[attr-defined]
+        props = self._get_para_props_at(cp)
+        para.paragraph_format = self._resolve_ldm_paragraph_format(props)
+        para.text = ""
+        return para
 
+    def _build_ldm_paragraph(self, para_text: str, p_start: int, p_end: int) -> ldm.Paragraph:
         para = ldm.Paragraph()
         props = self._get_para_props_at(p_start)
         para.paragraph_format = self._resolve_ldm_paragraph_format(props)
@@ -386,28 +837,26 @@ class DocFileReader(DocFileReaderCore):
 
         if char_ranges:
             for cs, ce, cp in char_ranges:
-                run_text = clean_control_chars(self._text[cs:ce])
+                run_text = clean_control_chars(self._text[cs:ce]).replace("\x0c", "")
                 if not run_text:
                     continue
                 merged = self._merge_char_props(style_cp, cp, cp._set_fields)
                 run = ldm.Run()
                 run.text = run_text
                 run.font = self._build_ldm_font(merged)
-                para.runs.append(run)
+                para._children.append(run)
                 text_parts.append(run_text)
         else:
             run = ldm.Run()
             run.text = clean_control_chars(para_text)
             run.font = self._build_ldm_font(style_cp)
-            para.runs.append(run)
+            para._children.append(run)
             text_parts.append(run.text)
 
         para.text = "".join(text_parts)
         return para
 
     def _build_ldm_font(self, cp: CharProps) -> ldm.Font:
-        from aspose.words_foss import light_document_model as ldm
-
         font = ldm.Font()
         font.bold = cp.bold
         font.italic = cp.italic
@@ -418,6 +867,11 @@ class DocFileReader(DocFileReaderCore):
         font.all_caps = cp.all_caps
         font.small_caps = cp.small_caps
         font.hidden = cp.hidden
+        font.emboss = cp.emboss
+        font.engrave = cp.engrave
+        font.outline = cp.outline
+        font.shadow = cp.shadow
+        font.kerning = cp.kerning
 
         if cp.font_index >= 0 and cp.font_index in self._fonts:
             font.name = self._fonts[cp.font_index]
@@ -429,6 +883,9 @@ class DocFileReader(DocFileReaderCore):
 
         if cp.style_index >= 0 and cp.style_index in self._styles:
             font.style_name = self._styles[cp.style_index]
+            sid = resolve_style_identifier(font.style_name, font.style_name)
+            if sid >= 0:
+                font.style_identifier = sid
         else:
             font.style_name = "Default Paragraph Font"
         return font
@@ -438,8 +895,6 @@ class DocFileReader(DocFileReaderCore):
     def _build_ldm_hyperlink_paragraph(
         self, para_text: str, p_start: int, p_end: int
     ) -> ldm.Paragraph:
-        from aspose.words_foss import light_document_model as ldm
-
         para = ldm.Paragraph()
         props = self._get_para_props_at(p_start)
         para.paragraph_format = self._resolve_ldm_paragraph_format(props)
@@ -455,102 +910,9 @@ class DocFileReader(DocFileReaderCore):
             run = ldm.Run()
             run.text = clean_text
             run.font = self._build_ldm_font(style_cp)
-            para.runs.append(run)
+            para._children.append(run)
         para.text = clean_text
         return para
-
-    # -- table builder --------------------------------------------------------
-
-    def _build_ldm_table_from_text(self, table_text: str) -> tuple[ldm.Table, str]:
-        from aspose.words_foss import light_document_model as ldm
-
-        tbl = ldm.Table()
-        trailing = ""
-        segments = table_text.split("\x07")
-        current_row: list[str] = []
-
-        for seg in segments:
-            if seg == "":
-                if current_row:
-                    row = ldm.Row()
-                    for ct in current_row:
-                        cell = ldm.Cell()
-                        para = ldm.Paragraph()
-                        if "\x13" in ct:
-                            ct = evaluate_fields(ct)
-                        ct = clean_control_chars(ct)
-                        para.text = ct
-                        run = ldm.Run()
-                        run.text = ct
-                        para.runs = [run]
-                        cell.paragraphs = [para]
-                        row.cells.append(cell)
-                    tbl.rows.append(row)
-                    current_row = []
-            else:
-                current_row.append(seg)
-
-        if current_row:
-            trailing = "\x07".join(current_row)
-        return tbl, trailing
-
-    def _pre_scan_cell_cps(self, paragraphs: list[tuple[int, int]], text: str) -> set[int]:
-        """Pre-scan body paragraphs to find CP starts of table cell content.
-
-        Walks backwards from each ``\\x07`` paragraph, collecting
-        preceding paragraphs that have direct PAPX formatting (non-empty
-        ``_set_fields``).  Paragraphs without direct formatting are body
-        text, not cell content.
-        """
-        cell_starts: set[int] = set()
-        for idx, (p_start, p_end) in enumerate(paragraphs):
-            if "\x07" not in text[p_start:p_end]:
-                continue
-            # The paragraph with \x07 is cell content.
-            cell_starts.add(p_start)
-            # Scan backwards for preceding cell paragraphs.
-            for prev_idx in range(idx - 1, -1, -1):
-                prev_start, prev_end = paragraphs[prev_idx]
-                prev_text = text[prev_start:prev_end]
-                if "\x0c" in prev_text:
-                    break  # page break
-                props = self._get_para_props_at(prev_start)
-                if not props._set_fields:
-                    break  # no direct formatting → not cell content
-                cell_starts.add(prev_start)
-        return cell_starts
-
-    def _absorb_preceding_into_table(self, tbl: object, children: list) -> None:
-        """Move preceding body paragraphs into the table's first cell.
-
-        In DOC files, multi-paragraph table cells store only the final
-        ``\\x07`` marker in the last paragraph.  Earlier paragraphs in
-        the same cell appear as plain body children.  This method walks
-        backwards through *children* and absorbs paragraphs that were
-        tagged as cell content during the pre-scan (stored in
-        ``_cell_para_starts``).
-        """
-        from aspose.words_foss import light_document_model as ldm
-
-        if not tbl.rows or not tbl.rows[0].cells:
-            return
-        first_cell = tbl.rows[0].cells[0]
-
-        absorb = 0
-        for i in range(len(children) - 1, -1, -1):
-            child = children[i]
-            if not isinstance(child, ldm.Paragraph):
-                break
-            if not hasattr(child, "_cell_cp") or child._cell_cp not in self._cell_para_starts:
-                break
-            absorb += 1
-
-        if absorb == 0:
-            return
-
-        merged = children[-absorb:]
-        del children[-absorb:]
-        first_cell.paragraphs = merged + first_cell.paragraphs
 
     # -- textbox injection (cover page) ---------------------------------------
 
@@ -561,8 +923,6 @@ class DocFileReader(DocFileReaderCore):
         ranges, and Escher ChildAnchor/Spgr records for child shape
         positions.  No font-size or position-ratio heuristics.
         """
-        from aspose.words_foss import light_document_model as ldm
-
         txbx_start = self._ccp_text + self._ccp_ftn + self._ccp_hdd
         txbx_end = txbx_start + self._ccp_txbx
         if txbx_end > len(self._text):
@@ -683,7 +1043,7 @@ class DocFileReader(DocFileReaderCore):
             shape.text_box = {"paragraphs": tb_paras}
 
             target = pb_para or attach_para
-            target.inline_extras.append(shape)
+            target._children.append(shape)
 
     def _build_stories_from_txid(
         self, txbx_start: int, txbx_end: int
@@ -738,8 +1098,6 @@ class DocFileReader(DocFileReaderCore):
 
     def _build_textbox_paragraphs(self, abs_start: int, abs_end: int) -> list:
         """Build LDM paragraphs from a textbox text range."""
-        from aspose.words_foss import light_document_model as ldm
-
         paras: list[ldm.Paragraph] = []
         line_pos = abs_start
         for line in self._text[abs_start:abs_end].split("\r"):
@@ -758,7 +1116,7 @@ class DocFileReader(DocFileReaderCore):
             run = ldm.Run()
             run.text = cleaned
             run.font = self._build_ldm_font(style_cp)
-            para.runs = [run]
+            para._children = [run]
             para.text = cleaned
             paras.append(para)
             line_pos += len(line) + 1
@@ -781,8 +1139,6 @@ class DocFileReader(DocFileReaderCore):
 
         Returns set of shape IDs handled (so Phase 2 can skip them).
         """
-        from aspose.words_foss import light_document_model as ldm
-
         handled: set[int] = set()
 
         for spid, props in fill_shapes:
@@ -813,7 +1169,7 @@ class DocFileReader(DocFileReaderCore):
             bar.is_inline = False
             bar._is_positioned = True
             bar.wrap_type = WrapType.NONE
-            bar.shading = ldm.Shading(background_color=color_str)
+            bar.shading = ldm.Shading(background_pattern_color=color_str)
             bar.left = abs_left + (child_anchor.left - group.coord_left) / grp_w * parent_w_mm
             bar.top = abs_top + (child_anchor.top - group.coord_top) / grp_h * parent_h_mm
             bar.width = (child_anchor.right - child_anchor.left) / grp_w * parent_w_mm
@@ -831,7 +1187,7 @@ class DocFileReader(DocFileReaderCore):
                         bar.vertical_alignment = 2  # bottom-anchored
                 handled.add(spid)
 
-            attach_para.inline_extras.append(bar)
+            attach_para._children.append(bar)
 
         return handled
 
@@ -840,8 +1196,6 @@ class DocFileReader(DocFileReaderCore):
     def _build_ldm_headers_footers(
         self,
     ) -> tuple[list[ldm.Paragraph], list[ldm.Paragraph]]:
-        from aspose.words_foss import light_document_model as ldm
-
         headers: list[ldm.Paragraph] = []
         footers: list[ldm.Paragraph] = []
 
@@ -914,7 +1268,7 @@ class DocFileReader(DocFileReaderCore):
                 run = ldm.Run()
                 run.text = cleaned
                 run.font = self._build_ldm_font(style_cp)
-                para.runs = [run]
+                para._children = [run]
                 para.text = cleaned
                 target.append(para)
                 line_pos += len(raw_line) + 1
@@ -937,7 +1291,7 @@ class DocFileReader(DocFileReaderCore):
                     # Convert to absolute page coords (mm)
                     shape.left = (margin_left_pt + anchor.left) * _PT_TO_MM
                     shape.top = (hdr_dist_pt + anchor.top) * _PT_TO_MM
-                    headers[0].inline_extras.append(shape)
+                    headers[0]._children.append(shape)
                     continue
 
                 # Non-image shape: check for line/border properties
@@ -968,7 +1322,7 @@ class DocFileReader(DocFileReaderCore):
                     bar_para.paragraph_format = ldm.ParagraphFormat(
                         alignment=ParagraphAlignment.RIGHT
                     )
-                    bar_para.inline_extras.append(bar)
+                    bar_para._children.append(bar)
                     headers.append(bar_para)
 
         return headers, footers

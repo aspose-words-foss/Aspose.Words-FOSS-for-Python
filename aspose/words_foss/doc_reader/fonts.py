@@ -2,8 +2,6 @@
 Font table (SttbfFfn) parser for DOC files.
 """
 
-from __future__ import annotations
-
 import struct
 
 

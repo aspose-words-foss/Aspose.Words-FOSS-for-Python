@@ -28,7 +28,6 @@ IMAGE_FILES = [
     "image_in_header.docx",
     "image_in_footer.docx",
     "wide_image.docx",
-    "no_images.docx",
 ]
 
 

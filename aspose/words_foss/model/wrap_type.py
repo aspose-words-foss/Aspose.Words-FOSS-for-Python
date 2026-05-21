@@ -1,10 +1,8 @@
-"""Drawing-related enums mirroring ``Aspose.Words.Drawing``."""
+"""Drawing-related enums for drawing/anchoring."""
 
 
 class WrapType:
     """Specifies how text is wrapped around a shape or picture.
-
-    Mirrors ``Aspose.Words.Drawing.WrapType``.
     """
 
     INLINE = 0

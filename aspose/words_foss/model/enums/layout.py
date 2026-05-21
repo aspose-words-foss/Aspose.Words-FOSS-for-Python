@@ -1,10 +1,8 @@
-"""Page and section layout enums mirroring Aspose.Words."""
+"""Page and section layout enums."""
 
 
 class HeightRule:
     """Specifies the rule for determining the height of an object.
-
-    Mirrors ``Aspose.Words.HeightRule``.
     """
 
     AT_LEAST = 0
@@ -19,8 +17,6 @@ class HeightRule:
 
 class SectionStart:
     """Specifies the type of break at the beginning of the section.
-
-    Mirrors ``Aspose.Words.SectionStart``.
     """
 
     CONTINUOUS = 0
@@ -32,8 +28,6 @@ class SectionStart:
 
 class Orientation:
     """Specifies page orientation.
-
-    Mirrors ``Aspose.Words.Orientation``.
     """
 
     PORTRAIT = 0

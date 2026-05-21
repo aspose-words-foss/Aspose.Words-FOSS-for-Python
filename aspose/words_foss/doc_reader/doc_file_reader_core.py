@@ -2,8 +2,6 @@
 Core DOC file reader — loading, parsing, property resolution, Markdown iteration.
 """
 
-from __future__ import annotations
-
 import re
 import struct
 from io import BytesIO
@@ -87,11 +85,16 @@ class DocFileReaderCore:
         self._lfo_map: dict[int, int] = {}
         self._text_byte_offset: int = 0x800
         self._text_is_compressed: bool = True
+        # Piece table: per-piece (cp_start, cp_end, fc_byte_start, f_compressed).
+        # ``fc_byte_start`` is already in CHARACTER units (FC/2 for non-compressed,
+        # FC for compressed) so ``cp = cp_start + (fc - fc_byte_start)``.
+        self._pieces: list[tuple[int, int, int, bool]] = []
         self._ccp_text: int = 0
         self._ccp_ftn: int = 0
         self._ccp_hdd: int = 0
         self._ccp_txbx: int = 0
         self._section_props: list[dict] = []
+        self._section_cps: list[int] = []  # CP boundaries between sections
         self._hdd_cps: list[int] = []
         # OfficeArt image data
         self._blips: list[BlipInfo] = []
@@ -100,6 +103,8 @@ class DocFileReaderCore:
         self._body_shape_anchors: list[ShapeAnchor] = []
         self._hdr_shape_anchors: list[ShapeAnchor] = []
         self._wd_bytes: bytes = b""
+        self._table_bytes: bytes = b""
+        self._data_stream_bytes: bytes = b""
         # FTXBXS: shape ID → (cp_start, cp_end) in textbox text stream
         self._textbox_stories: dict[int, tuple[int, int]] = {}
         # Escher child shape positions and group coordinate systems
@@ -153,9 +158,11 @@ class DocFileReaderCore:
         if lcb_clx > 0:
             clx = table[fc_clx : fc_clx + lcb_clx]
             self._text_byte_offset, self._text_is_compressed = self._get_text_offset_from_clx(clx)
+            self._pieces = self._parse_piece_table(clx)
         else:
             self._text_byte_offset = 0x800
             self._text_is_compressed = True
+            self._pieces = []
 
         # Parse styles (full parse with UPX property data)
         fc_stsh, lcb_stsh = get_fc_lcb(wd, fib, IDX_STSHF)
@@ -166,6 +173,10 @@ class DocFileReaderCore:
         # Parse font table
         fc_ffn, lcb_ffn = get_fc_lcb(wd, fib, IDX_STTBFFFN)
         self._fonts = parse_font_table(table, fc_ffn, lcb_ffn)
+
+        # Load Data stream first — PAPX may reference it via sprmPHugePapx.
+        if ole.exists("Data"):
+            self._data_stream_bytes = ole.openstream("Data").read()
 
         # Parse paragraph properties
         self._para_props = self._collect_papx(wd, table, fib)
@@ -182,7 +193,7 @@ class DocFileReaderCore:
 
         # Parse section properties (page setup)
         fc_sed, lcb_sed = get_fc_lcb(wd, fib, IDX_PLCFSED)
-        self._section_props = self._parse_plcf_sed(wd, table, fc_sed, lcb_sed)
+        self._section_props, self._section_cps = self._parse_plcf_sed(wd, table, fc_sed, lcb_sed)
 
         # Parse header/footer CP positions
         fc_hdd, lcb_hdd = get_fc_lcb(wd, fib, IDX_PLCFHDD)
@@ -193,6 +204,7 @@ class DocFileReaderCore:
 
         # Parse OfficeArt images and shapes
         self._wd_bytes = wd
+        self._table_bytes = table
         fc_dgg, lcb_dgg = get_fc_lcb(wd, fib, IDX_DGGINFO)
         if lcb_dgg > 0:
             self._blips = parse_blip_store(table, wd, fc_dgg, lcb_dgg)
@@ -216,15 +228,22 @@ class DocFileReaderCore:
             self._textbox_stories = parse_plcf_txbx_txt(table, fc_txbx, lcb_txbx)
 
     @staticmethod
-    def _parse_plcf_sed(wd: bytes, table: bytes, fc_sed: int, lcb_sed: int) -> list[dict]:
-        """Parse PlcfSed and SEPX records to extract section properties."""
+    def _parse_plcf_sed(
+        wd: bytes, table: bytes, fc_sed: int, lcb_sed: int
+    ) -> tuple[list[dict], list[int]]:
+        """Parse PlcfSed and SEPX records to extract section properties and CPs."""
         if lcb_sed == 0:
-            return []
+            return [], []
 
         sed_data = table[fc_sed : fc_sed + lcb_sed]
         n = (lcb_sed - 4) // 16
         if n <= 0:
-            return []
+            return [], []
+
+        # Read CP boundaries (n+1 uint32 values)
+        cps: list[int] = []
+        for i in range(n + 1):
+            cps.append(struct.unpack_from("<I", sed_data, i * 4)[0])
 
         sections: list[dict] = []
         sed_start = (n + 1) * 4
@@ -241,7 +260,47 @@ class DocFileReaderCore:
 
             sections.append(props)
 
-        return sections
+        return sections, cps
+
+    @staticmethod
+    def _parse_piece_table(clx: bytes) -> list[tuple[int, int, int, bool]]:
+        """Return per-piece (cp_start, cp_end, fc_real, f_compressed) tuples.
+
+        DOC text can split across pieces with mixed compression — Word
+        sometimes packs Hebrew/Asian runs as UTF-16 next to ASCII runs
+        in cp1252.  PAPX FCs reference the byte stream, so converting
+        an FC to a CP needs the right piece's compression flag, not a
+        global "is_compressed".
+        """
+        pos = 0
+        while pos < len(clx):
+            clxt = clx[pos]
+            if clxt == 0x02:
+                pos += 1
+                pcdt_size = struct.unpack_from("<I", clx, pos)[0]
+                pos += 4
+                pt = clx[pos : pos + pcdt_size]
+                n = (pcdt_size - 4) // 12
+                if n <= 0:
+                    return []
+                cps = [struct.unpack_from("<I", pt, i * 4)[0] for i in range(n + 1)]
+                pieces: list[tuple[int, int, int, bool]] = []
+                for i in range(n):
+                    pcd_start = (n + 1) * 4 + i * 8
+                    fc_val = struct.unpack_from("<I", pt, pcd_start + 2)[0]
+                    f_compressed = bool(fc_val & 0x40000000)
+                    fc_real = fc_val & 0x3FFFFFFF
+                    if f_compressed:
+                        fc_real //= 2
+                    pieces.append((cps[i], cps[i + 1], fc_real, f_compressed))
+                return pieces
+            elif clxt == 0x01:
+                pos += 1
+                cb = struct.unpack_from("<H", clx, pos)[0]
+                pos += 2 + cb
+            else:
+                pos += 1
+        return []
 
     def _get_text_offset_from_clx(self, clx: bytes) -> tuple[int, bool]:
         """Get the byte offset and compression flag of text from CLX."""
@@ -291,7 +350,14 @@ class DocFileReaderCore:
             bte_offset = (n + 1) * 4 + i * 4
             pn = struct.unpack_from("<I", papx_data, bte_offset)[0]
             all_props.extend(
-                parse_papx_fkp(wd, pn, self._text_byte_offset, self._text_is_compressed)
+                parse_papx_fkp(
+                    wd,
+                    pn,
+                    self._text_byte_offset,
+                    self._text_is_compressed,
+                    self._data_stream_bytes,
+                    self._pieces,
+                )
             )
 
         return sorted(all_props, key=lambda x: x[0])
@@ -315,7 +381,13 @@ class DocFileReaderCore:
             bte_offset = (n + 1) * 4 + i * 4
             pn = struct.unpack_from("<I", chpx_data, bte_offset)[0]
             all_props.extend(
-                parse_chpx_fkp(wd, pn, self._text_byte_offset, self._text_is_compressed)
+                parse_chpx_fkp(
+                    wd,
+                    pn,
+                    self._text_byte_offset,
+                    self._text_is_compressed,
+                    self._pieces,
+                )
             )
 
         return sorted(all_props, key=lambda x: x[0])
@@ -347,6 +419,13 @@ class DocFileReaderCore:
                 setattr(result, field, getattr(sd.para_props, field))
                 if field == "line_spacing":
                     result.line_spacing_rule = sd.para_props.line_spacing_rule
+                elif field == "borders":
+                    # Walk the four-slot border list in parallel; preserve
+                    # base-style borders for slots the derived style left
+                    # at None (matches Word's per-side border merge).
+                    for i, b in enumerate(sd.para_props.borders):
+                        if b is not None:
+                            result.borders[i] = b
         return result
 
     def _resolve_char_props(self, istd: int) -> CharProps:
@@ -399,6 +478,11 @@ class DocFileReaderCore:
             "all_caps",
             "small_caps",
             "hidden",
+            "emboss",
+            "engrave",
+            "outline",
+            "shadow",
+            "kerning",
             "style_index",
         ):
             setattr(result, field, getattr(style_cp, field))

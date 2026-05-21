@@ -1,6 +1,5 @@
 """Color parsing and setting helpers for the PDF writer."""
 
-from __future__ import annotations
 
 from typing import Optional, Tuple
 

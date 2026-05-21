@@ -6,8 +6,6 @@ exclusively by the Pydantic model classes defined in
 ``light_document_model.py``.
 """
 
-from __future__ import annotations
-
 import base64
 import html
 import os
@@ -16,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from aspose.words_foss import light_document_model as ldm
+from aspose.words_foss._visible_runs import visible_runs
 from aspose.words_foss.models import (
     ConversionOptions,
     HeadingStyle,
@@ -61,7 +60,7 @@ class LdmMarkdownWriter:
 
         # Header images
         for para in doc.header_paragraphs:
-            for item in para.inline_extras:
+            for item in para._children:
                 if isinstance(item, ldm.ShapeNode) and item.has_image and item.image_data:
                     blocks.append((self._BLOCK, self._render_image(item)))
 
@@ -79,7 +78,7 @@ class LdmMarkdownWriter:
 
         # Footer images
         for para in doc.footer_paragraphs:
-            for item in para.inline_extras:
+            for item in para._children:
                 if isinstance(item, ldm.ShapeNode) and item.has_image and item.image_data:
                     blocks.append((self._BLOCK, self._render_image(item)))
 
@@ -87,8 +86,9 @@ class LdmMarkdownWriter:
 
         # Append reference-style link definitions if any were collected
         if self._reference_links:
-            defs = "\n".join(f"[{label}]: {url}" for label, url in self._reference_links)
-            result = result.rstrip("\n") + "\n\n" + defs + "\n"
+            pb = self.options.paragraph_break
+            defs = pb.join(f"[{label}]: {url}" for label, url in self._reference_links)
+            result = result.rstrip(pb) + pb * 2 + defs + pb
 
         return result
 
@@ -132,8 +132,9 @@ class LdmMarkdownWriter:
             result.append(text)
             prev_tag = tag
 
-        output = "\n".join(result)
-        return output.rstrip() + "\n" if output else ""
+        pb = self.options.paragraph_break
+        output = pb.join(result)
+        return output.rstrip() + pb if output else ""
 
     # ------------------------------------------------------------------
     # Paragraph conversion
@@ -222,7 +223,7 @@ class LdmMarkdownWriter:
         # text runs.  Every DOCX-reader paragraph has a non-empty content_sequence,
         # so checking merely for non-emptiness would send image-free paragraphs
         # (code-blocks, quotes, list items) down this path unnecessarily.
-        if any(isinstance(i, ldm.ShapeNode) for i in para.content_sequence):
+        if any(isinstance(i, ldm.ShapeNode) for i in para._children):
             output_parts: list[str] = []
             pending_runs: list[ldm.Run] = []
 
@@ -236,7 +237,7 @@ class LdmMarkdownWriter:
                     if formatted is not None:
                         output_parts.append(formatted)
 
-            for item in para.content_sequence:
+            for item in para._children:
                 if (
                     isinstance(item, ldm.ShapeNode)
                     and item.has_image
@@ -256,11 +257,11 @@ class LdmMarkdownWriter:
         # Images from inline_extras come first, then the paragraph text.
         image_parts = [
             self._render_image(item)
-            for item in para.inline_extras
+            for item in para._children
             if isinstance(item, ldm.ShapeNode) and item.has_image and item.image_data is not None
         ]
 
-        text = self._convert_runs(para.runs, is_code_block, para)
+        text = self._convert_runs(visible_runs(para), is_code_block, para)
         text_part = (
             self._format_text_part(text, pf, style_name, is_code_block, para) if text else None
         )
@@ -304,14 +305,14 @@ class LdmMarkdownWriter:
     @staticmethod
     def _is_empty_paragraph(para: ldm.Paragraph) -> bool:
         """Return True if the paragraph has no visible content."""
-        if para.runs and any(r.text and r.text.strip() for r in para.runs):
+        if visible_runs(para) and any(r.text and r.text.strip() for r in visible_runs(para)):
             return False
-        if para.content_sequence and any(
-            isinstance(i, ldm.ShapeNode) for i in para.content_sequence
+        if para._children and any(
+            isinstance(i, ldm.ShapeNode) for i in para._children
         ):
             return False
-        if para.inline_extras and any(
-            isinstance(i, ldm.ShapeNode) and i.has_image for i in para.inline_extras
+        if para._children and any(
+            isinstance(i, ldm.ShapeNode) and i.has_image for i in para._children
         ):
             return False
         text = para.text.strip() if para.text else ""
@@ -321,8 +322,8 @@ class LdmMarkdownWriter:
         pf = para.paragraph_format
 
         # Bottom-border based detection
-        if len(pf.borders) >= 3:
-            bottom = pf.borders[2]  # top, left, bottom, ...
+        if pf.borders:
+            bottom = pf.borders[0]  # BorderType.Bottom (slot 0)
             if bottom.line_style > 0 and bottom.line_width >= 1.5:
                 return True
 
@@ -596,10 +597,10 @@ class LdmMarkdownWriter:
     def _extract_cell_text(self, cell: ldm.Cell) -> str:
         parts: list[str] = []
         for para in cell.paragraphs:
-            if para.content_sequence:
+            if para._children:
                 # Preserve XML element order using content_sequence
                 para_parts: list[str] = []
-                for item in para.content_sequence:
+                for item in para._children:
                     if isinstance(item, ldm.ShapeNode) and item.has_image and item.image_data:
                         para_parts.append(self._render_image(item))
                     elif isinstance(item, ldm.Run):
@@ -611,11 +612,11 @@ class LdmMarkdownWriter:
                     parts.append("".join(para_parts))
             else:
                 # Legacy path: images first, then text runs
-                for item in para.inline_extras:
+                for item in para._children:
                     if isinstance(item, ldm.ShapeNode) and item.has_image and item.image_data:
                         parts.append(self._render_image(item))
                 run_parts: list[str] = []
-                for run in para.runs:
+                for run in visible_runs(para):
                     text = run.text or ""
                     if text:
                         fmt = self._get_run_formatting(run)

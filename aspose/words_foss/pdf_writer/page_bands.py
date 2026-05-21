@@ -1,28 +1,84 @@
 """Header/footer callback installation and bookmark registration."""
 
-from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Union
 
 from fpdf import FPDF
 
 from aspose.words_foss import light_document_model as ldm
+from aspose.words_foss.pdf_writer._context import PDFWriterContext
 from aspose.words_foss.pdf_writer.constants import MIN_HEADER_FOOTER_Y_MM
 
-if TYPE_CHECKING:
-    from aspose.words_foss.pdf_writer.renderer import LdmPdfWriter
+
+def _collect_hf_children(
+    doc: ldm.Document, *, header: bool
+) -> list[Union[ldm.Paragraph, ldm.Table]]:
+    """Collect ordered children for header or footer rendering.
+
+    Prefers the per-section ``HeaderFooter.children`` list (which preserves
+    interleaved paragraph/table order) and falls back to the flat
+    ``doc.header_paragraphs`` / ``doc.footer_paragraphs`` for backwards
+    compatibility with LDMs that only carry paragraphs.
+    """
+    hf_type = 0 if header else 1
+    for sec in doc.sections:
+        for hf in sec.headers_footers:
+            if hf.header_footer_type == hf_type and hf.children:
+                return list(hf.children)
+    paras = doc.header_paragraphs if header else doc.footer_paragraphs
+    return list(paras)
+
+
+def _has_hf_content(doc: ldm.Document, *, header: bool) -> bool:
+    """Return True when the document has header or footer content."""
+    if header and doc.header_paragraphs:
+        return True
+    if not header and doc.footer_paragraphs:
+        return True
+    hf_type = 0 if header else 1
+    for sec in doc.sections:
+        for hf in sec.headers_footers:
+            if hf.header_footer_type == hf_type and hf.children:
+                return True
+    return False
+
+
+def _render_hf_children(
+    pdf: FPDF,
+    writer: PDFWriterContext,
+    children: list[Union[ldm.Paragraph, ldm.Table]],
+    *,
+    render_positioned: bool = False,
+) -> None:
+    """Render an ordered list of paragraphs and tables in a header/footer band."""
+    paras_for_shapes: list[ldm.Paragraph] = []
+    for child in children:
+        if isinstance(child, ldm.Paragraph):
+            para_start_y = pdf.get_y()
+            writer._paragraph_renderer.render_paragraph(pdf, child)
+            if render_positioned:
+                writer._shape_renderer.render_positioned_shapes_in(
+                    pdf, [child], line_y_override=para_start_y
+                )
+            paras_for_shapes.append(child)
+        elif isinstance(child, ldm.Table):
+            writer._table_renderer.render_table(pdf, child)
+    if not render_positioned and paras_for_shapes:
+        writer._shape_renderer.render_positioned_shapes_in(pdf, paras_for_shapes)
 
 
 def install_page_header(
     pdf: FPDF,
     doc: ldm.Document,
-    writer: LdmPdfWriter,
+    writer: PDFWriterContext,
     skip_first_page: bool,
     header_y_mm: float,
 ) -> None:
     """Install a per-page header callback on *pdf*."""
-    if not doc.header_paragraphs:
+    if not _has_hf_content(doc, header=True):
         return
+
+    children = _collect_hf_children(doc, header=True)
 
     def _header_callback() -> None:
         if skip_first_page and pdf.page_no() == 1:
@@ -36,12 +92,7 @@ def install_page_header(
         try:
             pdf.set_auto_page_break(auto=False, margin=0)
             pdf.set_xy(writer._page_margin_left, max(header_y_mm, MIN_HEADER_FOOTER_Y_MM))
-            for para in doc.header_paragraphs:
-                para_start_y = pdf.get_y()
-                writer._paragraph_renderer.render_paragraph(pdf, para)
-                writer._shape_renderer.render_positioned_shapes_in(
-                    pdf, [para], line_y_override=para_start_y
-                )
+            _render_hf_children(pdf, writer, children, render_positioned=True)
             final_y = max(pdf.get_y(), body_start_y)
             pdf.set_xy(writer._page_margin_left, final_y)
         finally:
@@ -54,13 +105,15 @@ def install_page_header(
 def install_page_footer(
     pdf: FPDF,
     doc: ldm.Document,
-    writer: LdmPdfWriter,
+    writer: PDFWriterContext,
     skip_first_page: bool,
     footer_y_mm: float,
 ) -> None:
     """Install a per-page footer callback on *pdf*."""
-    if not doc.footer_paragraphs:
+    if not _has_hf_content(doc, header=False):
         return
+
+    children = _collect_hf_children(doc, header=False)
 
     def _footer_callback() -> None:
         if skip_first_page and pdf.page_no() == 1:
@@ -77,9 +130,7 @@ def install_page_footer(
                 writer._page_height - writer._page_margin_bottom,
             )
             pdf.set_xy(writer._page_margin_left, band_top)
-            for para in doc.footer_paragraphs:
-                writer._paragraph_renderer.render_paragraph(pdf, para)
-            writer._shape_renderer.render_positioned_shapes_in(pdf, doc.footer_paragraphs)
+            _render_hf_children(pdf, writer, children)
         finally:
             pdf.set_auto_page_break(auto=prev_auto, margin=prev_bottom)
             pdf._in_footer_render = False  # type: ignore[attr-defined]
@@ -93,7 +144,7 @@ def register_bookmarks(
     anchor_links: dict[str, int],
 ) -> None:
     """Point every :class:`BookmarkStart` in *para* at the current page."""
-    for extra in para.inline_extras:
+    for extra in para._children:
         if not isinstance(extra, ldm.BookmarkStart) or not extra.name:
             continue
         link_id = anchor_links.get(extra.name)

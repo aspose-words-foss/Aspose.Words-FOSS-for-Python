@@ -5,8 +5,6 @@ Extracts all namespace URIs, mapping dictionaries, and magic numbers
 from the monolithic reader module into a single, importable location.
 """
 
-from __future__ import annotations
-
 from aspose.words_foss.model.enums import (
     CellVerticalAlignment as _CVA,
     LineSpacingRule as _LSRule,
@@ -123,7 +121,10 @@ _BODY_ANCHOR_MAP: dict[str, int] = {
 
 _HIGHLIGHT_COLOR_MAP: dict[str, str] = {
     "yellow": "Color [A=255, R=255, G=255, B=0]",
-    "green": "Color [A=255, R=0, G=128, B=0]",
+    # Word distinguishes ``green`` (bright #00FF00) from ``darkGreen``
+    # (#008000); a previous version of this table flattened both to
+    # the dark variant which lost the highlight token on round-trip.
+    "green": "Color [A=255, R=0, G=255, B=0]",
     "cyan": "Color [A=255, R=0, G=255, B=255]",
     "magenta": "Color [A=255, R=255, G=0, B=255]",
     "blue": "Color [A=255, R=0, G=0, B=255]",
@@ -227,6 +228,26 @@ _LINE_RULE_MAP = {
     "auto": _LSRule.MULTIPLE,
 }
 
+_TAB_ALIGNMENT_MAP = {
+    "left": 0,
+    "center": 1,
+    "right": 2,
+    "decimal": 3,
+    "bar": 4,
+    "list": 5,
+    "clear": 6,
+    "num": 5,
+}
+
+_TAB_LEADER_MAP = {
+    "none": 0,
+    "dot": 1,
+    "hyphen": 2,
+    "underscore": 3,
+    "heavy": 4,
+    "middleDot": 5,
+}
+
 _NUMBER_STYLE_MAP = {
     "decimal": 0,
     "upperRoman": 1,
@@ -238,10 +259,10 @@ _NUMBER_STYLE_MAP = {
     "none": 255,
 }
 
-# Built-in Word style names: OOXML w:name → Aspose.Words canonical name.
-# Aspose.Words resolves built-in styles by their styleIdentifier to canonical
+# Built-in Word style names: OOXML w:name → canonical display name.
+# Built-in styles are resolved by their styleIdentifier to canonical
 # English names, which may differ in casing or wording from the OOXML w:name.
-# Built-in Word style names that Aspose.Words maps to non-obvious canonical
+# Built-in Word style names that we map to non-obvious canonical
 # forms.  Entries whose canonical name can be derived by _canonicalize_style_name
 # (title-case / acronym rules) are intentionally omitted.
 _BUILTIN_STYLE_NAME_MAP: dict[str, str] = {
@@ -255,7 +276,7 @@ _BUILTIN_STYLE_NAME_MAP: dict[str, str] = {
     "macro": "Macro Text",
 }
 
-# Prefixes that are acronyms in Aspose.Words canonical style names.
+# Prefixes that are acronyms in canonical style names.
 _ACRONYM_PREFIXES = ("toc", "toa")
 
 # Words that stay lowercase in title-cased style names.

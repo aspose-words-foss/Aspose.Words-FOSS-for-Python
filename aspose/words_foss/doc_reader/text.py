@@ -2,13 +2,12 @@
 Text extraction, field evaluation, and hyperlink parsing for DOC files.
 """
 
-from __future__ import annotations
-
 import re
 import struct
 
 from aspose.words_foss.doc_reader.constants import IDX_CLX
 from aspose.words_foss.doc_reader.fib import FibData, get_fc_lcb
+from aspose.words_foss.docx_reader import PAGE_FIELD_SENTINEL
 
 # Characters to strip from run text (shape anchors, field codes, etc.)
 # Includes \x13-\x15 (field start/sep/end).
@@ -175,7 +174,6 @@ def evaluate_fields(text: str) -> str:
             elif field_code.split()[0] == "PAGE" if field_code.strip() else False:
                 # Emit the same sentinel the DOCX reader uses so the
                 # PDF writer can substitute the live page number.
-                from aspose.words_foss.docx_reader import PAGE_FIELD_SENTINEL
 
                 result.append(PAGE_FIELD_SENTINEL)
             else:

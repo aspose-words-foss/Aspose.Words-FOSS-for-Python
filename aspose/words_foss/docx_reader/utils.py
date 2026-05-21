@@ -5,10 +5,7 @@ Pure functions for color conversion, content-type detection,
 style name canonicalization, and XML element text collection.
 """
 
-from __future__ import annotations
-
-from typing import TYPE_CHECKING
-
+from aspose.words_foss import light_document_model as ldm
 from aspose.words_foss.docx_reader.constants import (
     COLOR_EMPTY,
     W_NS,
@@ -19,13 +16,11 @@ from aspose.words_foss.docx_reader.constants import (
     _MAX_COLOR_CHANNEL,
 )
 
-if TYPE_CHECKING:
-    from xml.etree import ElementTree as ET
-    from aspose.words_foss import light_document_model as ldm
+from xml.etree import ElementTree as ET
 
 
-def _hex_to_aspose_color(hex_color: str) -> str:
-    """Convert a hex color string to Aspose.Words Color format.
+def _hex_to_ldm_color(hex_color: str) -> str:
+    """Convert a hex color string to LDM Color format.
 
     Examples:
         "" or "auto"  -> "Color [Empty]"
@@ -46,11 +41,118 @@ def _hex_to_aspose_color(hex_color: str) -> str:
     return f"Color [A=255, R={r}, G={g}, B={b}]"
 
 
-def _empty_borders() -> "list[ldm.Border]":
-    """Return 6 default Border objects with Color [Empty]."""
-    from aspose.words_foss import light_document_model as ldm
+#: Canonical 8-slot border order matching
+#: :class:`BorderType` (0..7):
+#: 0=Bottom, 1=Left, 2=Right, 3=Top, 4=Horizontal, 5=Vertical,
+#: 6=DiagonalDown, 7=DiagonalUp.  Slots that don't apply to a given
+#: context (e.g. diagonals on a paragraph) stay ``Color [Empty]``.
+#: ``Horizontal`` carries both OOXML ``<w:insideH>`` (table/cell) and
+#: ``<w:between>`` (paragraph) — both unify into one
+#: ``BorderType.Horizontal``.  OOXML ``<w:bar>`` has no counterpart on
+#: ``BorderType`` and is dropped on read.
+BORDER_SLOTS: tuple[str, ...] = (
+    "bottom",        # 0  BorderType.Bottom
+    "left",          # 1  BorderType.Left
+    "right",         # 2  BorderType.Right
+    "top",           # 3  BorderType.Top
+    "horizontal",    # 4  BorderType.Horizontal  (insideH / between)
+    "vertical",      # 5  BorderType.Vertical    (insideV)
+    "diagonal_down", # 6  BorderType.DiagonalDown (tl2br)
+    "diagonal_up",   # 7  BorderType.DiagonalUp   (tr2bl)
+)
 
-    return [ldm.Border(color=COLOR_EMPTY) for _ in range(6)]
+#: OOXML side-tag → :data:`BORDER_SLOTS` index.  Handles the bidi
+#: aliases ``start`` / ``end`` (synonyms for ``left`` / ``right`` in
+#: right-to-left documents) and unifies the paragraph-only
+#: ``<w:between>`` with the table-only ``<w:insideH>`` into the
+#: ``Horizontal`` slot.  ``<w:bar>`` has no counterpart on
+#: ``BorderType`` and is dropped on read.
+OOXML_BORDER_TO_SLOT: dict[str, int] = {
+    "bottom": 0,
+    "left": 1, "start": 1,
+    "right": 2, "end": 2,
+    "top": 3,
+    "insideH": 4, "between": 4,
+    "insideV": 5,
+    "tl2br": 6,
+    "tr2bl": 7,
+}
+
+#: Slot baseline for the writer-shape border list: the four outer
+#: borders plus Horizontal/Vertical are always present in the
+#: serialized form; diagonals are grown on demand.
+BORDER_MIN_SLOTS: int = 6
+
+
+def _empty_borders() -> "list[ldm.Border]":
+    """Return :data:`BORDER_MIN_SLOTS` empty ``Border``\\ s.
+
+    The 8 ``BorderType`` slots collapse to 6 when the diagonals
+    are unset; diagonals are grown by
+    :meth:`LdmBuilderMixin._build_ldm_borders` whenever a
+    ``<w:tl2br>`` / ``<w:tr2bl>`` is present in OOXML.
+    """
+    return [ldm.Border(color=COLOR_EMPTY) for _ in range(BORDER_MIN_SLOTS)]
+
+
+def _is_empty_border(border: "ldm.Border") -> bool:
+    """A border is empty when it carries no visible attributes.
+
+    Accepts both ``Color [Empty]`` (the reader's canonical placeholder)
+    and the bare ``Border()`` Pydantic default (``color=""``).
+    """
+    return (
+        not border.line_style
+        and not border.line_width
+        and (not border.color or border.color == COLOR_EMPTY)
+    )
+
+
+def _trim_trailing_empty_borders(borders: "list[ldm.Border]") -> "list[ldm.Border]":
+    """Trim trailing empty entries down to :data:`BORDER_MIN_SLOTS`.
+
+    Preserves indexing for slots that *are* set: stops shrinking the
+    instant a non-empty trailing slot is encountered, so a list with
+    ``DiagonalUp`` set but ``DiagonalDown`` empty retains both
+    (length 8) rather than collapsing the diagonals out of order.
+    """
+    while len(borders) > BORDER_MIN_SLOTS and _is_empty_border(borders[-1]):
+        borders.pop()
+    return borders
+
+
+def parse_onoff(elem: ET.Element | None, *, default: bool = False) -> bool:
+    """Parse a Word CT_OnOff element (``<w:b/>``, ``<w:keepLines/>`` …).
+
+    Returns ``default`` when *elem* is ``None``.  When *elem* is present
+    without ``@w:val``, returns ``True`` (Word's "tag present = on"
+    convention).  Anything except ``"0"`` / ``"false"`` is also ``True``.
+    """
+    if elem is None:
+        return default
+    val = elem.get(f"{W_NS}val")
+    return val is None or val not in ("false", "0")
+
+
+def apply_onoff_attrs(
+    target: object,
+    parent: ET.Element | None,
+    mapping: tuple[tuple[str, str, bool], ...],
+) -> None:
+    """Apply a batch of CT_OnOff children to attributes of *target*.
+
+    *mapping* is an iterable of ``(child_local_name, attribute_name,
+    default)`` triples.  For every triple the function looks up
+    ``<w:{child_local_name}>`` under *parent*; when present, the
+    matching attribute on *target* is set to the result of
+    :func:`parse_onoff` (using *default* as the fallback).
+    """
+    if parent is None:
+        return
+    for tag, attr, default in mapping:
+        elem = parent.find(f"{W_NS}{tag}")
+        if elem is not None:
+            setattr(target, attr, parse_onoff(elem, default=default))
 
 
 def _ext_to_content_type(filename: str) -> str:
@@ -60,7 +162,7 @@ def _ext_to_content_type(filename: str) -> str:
 
 
 def _canonicalize_style_name(raw_name: str) -> str:
-    """Resolve a built-in OOXML style name to its Aspose.Words canonical form.
+    """Resolve a built-in OOXML style name to its canonical form.
 
     Rules applied in order:
     1. Explicit overrides (word renames, outline lists, etc.)
@@ -94,14 +196,20 @@ def _canonicalize_style_name(raw_name: str) -> str:
     return " ".join(result)
 
 
-def _collect_run_text(r_elem: "ET.Element") -> str:
+def _collect_run_text(r_elem: ET.Element) -> str:
     """Collect text from a <w:r> element, handling special characters.
 
-    Processes <w:t>, <w:br>, <w:tab>, and <w:cr> children.
+    Processes <w:t>, <w:instrText>, <w:br>, <w:tab>, and <w:cr> children.
+    ``<w:instrText>`` carries field-code text in the Aspose model (regular
+    runs that happen to sit between ``begin`` and ``separate``); reading
+    its text the same way as ``<w:t>`` lets the writer round-trip mixed
+    sequences of breaks and instruction text inside one ``<w:r>``.
     """
     parts: list[str] = []
     for child in r_elem:
         if child.tag == f"{W_NS}t":
+            parts.append(child.text or "")
+        elif child.tag == f"{W_NS}instrText":
             parts.append(child.text or "")
         elif child.tag == f"{W_NS}br":
             br_type = child.get(f"{W_NS}type", "")
@@ -121,8 +229,8 @@ def _collect_run_text(r_elem: "ET.Element") -> str:
 def _apply_theme_color_modifiers(
     base_hex: str,
     *,
-    tint: "str | None" = None,
-    shade: "str | None" = None,
+    tint: str | None = None,
+    shade: str | None = None,
 ) -> str:
     """Apply ``w:themeTint`` / ``w:themeShade`` modifiers to a base RGB.
 

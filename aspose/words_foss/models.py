@@ -49,6 +49,7 @@ class ConversionOptions:
     export_images_as_base64: bool = False
     images_folder: str = ""
     images_folder_alias: str = ""
+    paragraph_break: str = "\n"
 
 
 @dataclass

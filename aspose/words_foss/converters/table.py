@@ -2,6 +2,7 @@
 
 from typing import Optional
 
+from aspose.words_foss._visible_runs import visible_runs
 from aspose.words_foss.models import Table, TableRow, TableCell, ConversionOptions
 from aspose.words_foss.docx_reader import TableData, CellData, ParagraphData, RunData
 
@@ -45,7 +46,7 @@ class TableConverter:
         parts = []
         for para in cell.paragraphs:
             para_parts = []
-            for run in para.runs:
+            for run in visible_runs(para):
                 text = run.text or ""
                 if text:
                     text = self._apply_inline_formatting(run, text)

@@ -1,10 +1,8 @@
-"""Table-related enums mirroring Aspose.Words.Tables."""
+"""Table-related enums."""
 
 
 class CellMerge:
     """Specifies how a cell in a table is merged with other cells.
-
-    Mirrors ``Aspose.Words.Tables.CellMerge``.
     """
 
     NONE = 0
@@ -14,8 +12,6 @@ class CellMerge:
 
 class CellVerticalAlignment:
     """Specifies vertical justification of text inside a table cell.
-
-    Mirrors ``Aspose.Words.Tables.CellVerticalAlignment``.
     """
 
     TOP = 0

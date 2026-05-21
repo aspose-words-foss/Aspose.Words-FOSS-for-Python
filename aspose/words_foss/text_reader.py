@@ -10,11 +10,10 @@ flow through the standard Converter pipeline — identical to how DOCX
 and DOC formats are handled via the Document class.
 """
 
-from __future__ import annotations
-
 from pathlib import Path
-from typing import Optional, Union, BinaryIO, Iterator, TYPE_CHECKING
+from typing import Optional, Union, BinaryIO, Iterator
 
+from aspose.words_foss import light_document_model as ldm
 from aspose.words_foss.docx_reader import (
     ParagraphData,
     RunData,
@@ -22,8 +21,6 @@ from aspose.words_foss.docx_reader import (
     NumberingInfo,
 )
 
-if TYPE_CHECKING:
-    from aspose.words_foss import light_document_model as ldm
 
 
 class TextFileReader:
@@ -72,8 +69,6 @@ class TextFileReader:
 
     def to_light_document(self) -> ldm.Document:
         """Build a light_document_model.Document from the loaded text."""
-        from aspose.words_foss import light_document_model as ldm
-
         doc = ldm.Document()
         children: list[ldm.Paragraph | ldm.Table | ldm.UnknownNode] = []
 
@@ -83,7 +78,7 @@ class TextFileReader:
                 para.text = line
                 run = ldm.Run()
                 run.text = line
-                para.runs = [run]
+                para._children = [run]
                 children.append(para)
 
         sec = ldm.Section()
@@ -144,8 +139,6 @@ class MarkdownFileReader:
         tight constructs (lists, code fences, etc.) that span multiple
         consecutive lines.
         """
-        from aspose.words_foss import light_document_model as ldm
-
         doc = ldm.Document()
         children: list[ldm.Paragraph | ldm.Table | ldm.UnknownNode] = []
 
@@ -160,7 +153,7 @@ class MarkdownFileReader:
                         para.text = block_text
                         run = ldm.Run()
                         run.text = block_text
-                        para.runs = [run]
+                        para._children = [run]
                         children.append(para)
                         block = []
                 else:
@@ -171,7 +164,7 @@ class MarkdownFileReader:
                 para.text = block_text
                 run = ldm.Run()
                 run.text = block_text
-                para.runs = [run]
+                para._children = [run]
                 children.append(para)
 
         sec = ldm.Section()

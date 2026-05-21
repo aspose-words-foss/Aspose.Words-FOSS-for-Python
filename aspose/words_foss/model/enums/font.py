@@ -1,10 +1,8 @@
-"""Font-related enums mirroring Aspose.Words."""
+"""Font-related enums."""
 
 
 class Underline:
     """Specifies type of the underline applied to a font.
-
-    Mirrors ``Aspose.Words.Underline``.
     """
 
     NONE = 0

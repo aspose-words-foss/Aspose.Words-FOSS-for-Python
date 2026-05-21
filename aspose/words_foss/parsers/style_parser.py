@@ -21,29 +21,40 @@ class ParsedStyle:
 
 
 class StyleParser:
-    """Parser for DOCX style names and properties."""
+    """Parser for DOCX style names and properties.
+
+    Heading detection uses ``style_identifier`` first (locale-independent),
+    then falls back to the regex-based name matching for custom styles.
+    """
 
     HEADING_PATTERN = re.compile(r"Heading\s*(\d+)", re.IGNORECASE)
     SETEXT_HEADING_PATTERN = re.compile(r"SetextHeading(\d+)", re.IGNORECASE)
     QUOTE_PATTERN = re.compile(r"Quote(\d*)", re.IGNORECASE)
     CODE_PATTERN = re.compile(r"(Fenced|Indented|Inline)?Code\.?(\w+)?", re.IGNORECASE)
 
-    def parse(self, style_name: str) -> ParsedStyle:
-        """Parse a style name into structured information."""
+    def parse(self, style_name: str, *, style_identifier: int = 0) -> ParsedStyle:
+        """Parse a style name into structured information.
+
+        ``style_identifier`` is the locale-independent built-in ID.  When
+        it falls in the heading range (1-9), the regex fallback is skipped.
+        """
         if not style_name:
             return ParsedStyle(name="Normal")
 
         result = ParsedStyle(name=style_name)
 
-        result.heading_level = self._parse_heading(style_name)
+        result.heading_level = self._parse_heading(style_name, style_identifier)
         result.is_quote, result.quote_level = self._parse_quote(style_name)
         result.is_code, result.code_type, result.code_language = self._parse_code(style_name)
         result.is_list_paragraph = self._is_list_style(style_name)
 
         return result
 
-    def _parse_heading(self, style_name: str) -> int:
-        """Extract heading level from style name."""
+    def _parse_heading(self, style_name: str, style_identifier: int = 0) -> int:
+        """Extract heading level — prefer style_identifier over name regex."""
+        if 1 <= style_identifier <= 9:
+            return min(style_identifier, 6)
+
         setext_match = self.SETEXT_HEADING_PATTERN.search(style_name)
         if setext_match:
             return min(int(setext_match.group(1)), 6)

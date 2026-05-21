@@ -1,6 +1,6 @@
 [project]
 name = "aspose-words-foss"
-version = "26.4.1"
+version = "26.5.0"
 description = "Lightweight free open-source alternative to Aspose.Words — convert DOCX, DOC, RTF to Markdown, text, and PDF"
 readme = "README.md"
 license = {text = "MIT"}

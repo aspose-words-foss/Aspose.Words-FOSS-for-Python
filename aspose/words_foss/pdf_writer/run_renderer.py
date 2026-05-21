@@ -4,9 +4,8 @@ Handles left-aligned writes, aligned cell rows, highlight rectangles,
 and strikethrough lines.
 """
 
-from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 from fpdf import FPDF
 
@@ -29,15 +28,13 @@ from aspose.words_foss.pdf_writer.text import (
     safe_text,
 )
 from aspose.words_foss.docx_reader import PAGE_FIELD_SENTINEL
-
-if TYPE_CHECKING:
-    from aspose.words_foss.pdf_writer.renderer import LdmPdfWriter
+from aspose.words_foss.pdf_writer._context import PDFWriterContext
 
 
 class RunRenderer:
     """Renders formatted runs (text segments with fonts, colors, links)."""
 
-    def __init__(self, writer: LdmPdfWriter) -> None:
+    def __init__(self, writer: PDFWriterContext) -> None:
         self._writer = writer
 
     # ------------------------------------------------------------------
@@ -53,6 +50,9 @@ class RunRenderer:
         newline: bool = True,
         line_h_override: Optional[float] = None,
         is_toc: bool = False,
+        tab_stops: Optional[ldm.TabStopCollection] = None,
+        default_tab_stop: float = 36.0,
+        pf: Optional[ldm.ParagraphFormat] = None,
     ) -> None:
         """Render runs with inline formatting: bold, italic, underline, colors, sizes."""
         fs = DEFAULT_FONT_SIZE_PT
@@ -70,7 +70,7 @@ class RunRenderer:
         # For non-left alignment, use multi_cell which supports align
         if align != "L" or (has_tab and is_toc):
             self.render_formatted_runs_aligned(
-                pdf, runs, align=align, line_h_override=line_h_override, is_toc=is_toc
+                pdf, runs, align=align, line_h_override=line_h_override, is_toc=is_toc, pf=pf
             )
             return
 
@@ -87,15 +87,23 @@ class RunRenderer:
             )
 
             # Strip form-feed characters ("\f" = Word page-break marker).
-            # Honouring them mid-paragraph causes spurious page breaks that
-            # don't match Word's actual layout (Word suppresses breaks that
-            # would leave large gaps);
-            #
-            # Non-TOC tabs (``4.1<tab>Heading``) collapse to a single
-            # space so the number and title render on the same line
-            # without the aligned renderer's column-split treatment.
             text = text.replace("\f", "")
             if "\t" in text:
+                if tab_stops and tab_stops.tab_stops:
+                    apply_run_font(pdf, font, default_size=fs)
+                    pieces = text.split("\t")
+                    for p_idx, piece in enumerate(pieces):
+                        if p_idx > 0:
+                            self._advance_to_tab_stop(
+                                pdf, tab_stops, default_tab_stop, line_h,
+                                upcoming_text=piece,
+                            )
+                        if piece:
+                            resolved = self._resolve_run_text(pdf, piece)
+                            if resolved:
+                                resolved = apply_caps(resolved, font)
+                                pdf.write(h=line_h, text=safe_text(resolved))
+                    continue
                 text = text.replace("\t", " ")
             text = self._resolve_run_text(pdf, text)
             if not text:
@@ -131,6 +139,68 @@ class RunRenderer:
         if newline:
             pdf.ln()
 
+    def _advance_to_tab_stop(
+        self,
+        pdf: FPDF,
+        tab_stops: ldm.TabStopCollection,
+        default_tab_stop: float,
+        line_h: float,
+        upcoming_text: str = "",
+    ) -> None:
+        """Advance cursor to the next tab stop position, drawing leader fill.
+
+        Handles CENTER/RIGHT/DECIMAL alignment by offsetting the target
+        position based on the width of *upcoming_text*.
+        """
+        w = self._writer
+        current_x = pdf.get_x()
+        margin_left = w._page_margin_left
+        pos_from_margin = current_x - margin_left
+        pos_pt = pos_from_margin / PT_TO_MM
+
+        next_tab = tab_stops.after(pos_pt)
+        if next_tab is not None:
+            target_pt = next_tab.position
+        else:
+            step = default_tab_stop if default_tab_stop > 0 else 36.0
+            target_pt = ((pos_pt // step) + 1) * step
+
+        if next_tab and upcoming_text:
+            alignment = next_tab.alignment
+            text_w_mm = pdf.get_string_width(safe_text(upcoming_text))
+            text_w_pt = text_w_mm / PT_TO_MM
+            if alignment == 1:  # CENTER
+                target_pt -= text_w_pt / 2
+            elif alignment == 2:  # RIGHT
+                target_pt -= text_w_pt
+            elif alignment == 3:  # DECIMAL
+                dot_idx = -1
+                for ci, ch in enumerate(upcoming_text):
+                    if ch in ".,":
+                        dot_idx = ci
+                        break
+                if dot_idx >= 0:
+                    before_w = pdf.get_string_width(safe_text(upcoming_text[:dot_idx])) / PT_TO_MM
+                else:
+                    before_w = text_w_pt
+                target_pt -= before_w
+
+        target_x = margin_left + target_pt * PT_TO_MM
+        gap = target_x - current_x
+        if gap <= 0:
+            return
+
+        if next_tab and next_tab.leader > 0:
+            _LEADER_CHARS = {1: ".", 2: "-", 3: "_", 4: "_", 5: "·"}
+            ch = _LEADER_CHARS.get(next_tab.leader, ".")
+            char_w = pdf.get_string_width(ch)
+            if char_w > 0:
+                count = int(gap / char_w)
+                if count > 0:
+                    pdf.write(h=line_h, text=ch * count)
+
+        pdf.set_x(target_x)
+
     def render_formatted_runs_aligned(
         self,
         pdf: FPDF,
@@ -139,6 +209,7 @@ class RunRenderer:
         align: str = "C",
         line_h_override: Optional[float] = None,
         is_toc: bool = False,
+        pf: Optional[ldm.ParagraphFormat] = None,
     ) -> None:
         """Render runs with per-run formatting inside an aligned line.
 
@@ -320,7 +391,10 @@ class RunRenderer:
         w = pdf.get_string_width(text)
         if w <= 0:
             return
-        x = pdf.get_x()
+        # ``pdf.cell`` renders text shifted right by ``c_margin`` (1 mm by
+        # default).  Align the fill rectangle with that text origin so the
+        # highlight tracks the glyphs instead of leading them.
+        x = pdf.get_x() + pdf.c_margin
         y = pdf.get_y()
         pdf.set_fill_color(*rgb)
         pdf.rect(x, y + line_h * HIGHLIGHT_Y_OFFSET_RATIO, w, line_h * HIGHLIGHT_HEIGHT_RATIO, "F")
@@ -336,8 +410,11 @@ class RunRenderer:
     ) -> None:
         """Write *text* with a filled highlight background.
 
-        Uses ``pdf.cell(fill=True)`` per line so the highlight
-        rectangle always matches the rendered text exactly.
+        Paints the fill rectangle separately and writes the text on top so
+        the rectangle stays aligned with the glyphs.  ``pdf.cell`` offsets
+        text by ``c_margin`` (1 mm by default); using ``fill=True`` would
+        anchor the fill at the cell's left edge instead, producing a
+        half-character drift between text and highlight.
         """
         w = self._writer
         right_edge = w._page_width - w._page_margin_right
@@ -349,7 +426,8 @@ class RunRenderer:
             text_w = pdf.get_string_width(text)
 
             if text_w <= avail:
-                pdf.cell(w=text_w, h=line_h, text=text, fill=True, link=link)
+                self._fill_text_rect(pdf, x, pdf.get_y(), text_w, line_h)
+                pdf.cell(w=text_w, h=line_h, text=text, link=link)
                 break
 
             # Find the last space-separated word that fits.
@@ -368,13 +446,25 @@ class RunRenderer:
             rest = " ".join(words[fit_count:])
 
             first_w = pdf.get_string_width(first)
-            pdf.cell(w=first_w, h=line_h, text=first, fill=True, link=link)
+            self._fill_text_rect(pdf, x, pdf.get_y(), first_w, line_h)
+            pdf.cell(w=first_w, h=line_h, text=first, link=link)
 
             # Advance to the next line at the left margin.
             pdf.ln(line_h)
             pdf.set_x(w._page_margin_left)
 
             text = rest
+
+    @staticmethod
+    def _fill_text_rect(pdf: FPDF, x: float, y: float, w: float, h: float) -> None:
+        """Paint the highlight rectangle behind a cell of width *w*.
+
+        Shifts by ``pdf.c_margin`` to match the text origin used by
+        ``pdf.cell``.
+        """
+        if w <= 0:
+            return
+        pdf.rect(x + pdf.c_margin, y, w, h, "F")
 
     def _resolve_run_text(self, pdf: FPDF, text: str) -> str:
         """Resolve reader-emitted sentinels to their live page-local values."""

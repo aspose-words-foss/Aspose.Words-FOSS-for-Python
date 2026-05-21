@@ -6,8 +6,6 @@ These lightweight dataclasses represent parsed DOCX content
 decoupled from XML parsing and LDM construction.
 """
 
-from __future__ import annotations
-
 from dataclasses import dataclass, field
 from typing import Optional
 

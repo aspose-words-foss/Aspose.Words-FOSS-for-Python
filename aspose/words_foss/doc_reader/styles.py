@@ -2,10 +2,10 @@
 Style sheet (STSH) parser for DOC files.
 """
 
-from __future__ import annotations
-
+import re
 import struct
 
+from aspose.words_foss.doc_reader.constants import STI_NAMES
 from aspose.words_foss.doc_reader.properties import (
     CharProps,
     ParaProps,
@@ -15,6 +15,52 @@ from aspose.words_foss.doc_reader.properties import (
     get_para_sprm_fields,
     parse_sprms,
 )
+from aspose.words_foss.model.style_identifiers import IDENTIFIER_TO_STYLE_ID
+
+# Locale fallback when sti doesn't pin a built-in but the name does.
+_LOCALIZED_NAMES: dict[str, str] = {
+    "Абзац списка": "List Paragraph",
+}
+
+# OOXML styleId → Word ribbon display name where camel-splitting alone is wrong.
+_DISPLAY_NAME_OVERRIDES: dict[str, str] = {
+    "Heading1": "Heading 1",
+    "Heading2": "Heading 2",
+    "Heading3": "Heading 3",
+    "Heading4": "Heading 4",
+    "Heading5": "Heading 5",
+    "Heading6": "Heading 6",
+    "Heading7": "Heading 7",
+    "Heading8": "Heading 8",
+    "Heading9": "Heading 9",
+    "TOC1": "TOC 1", "TOC2": "TOC 2", "TOC3": "TOC 3",
+    "TOC4": "TOC 4", "TOC5": "TOC 5", "TOC6": "TOC 6",
+    "TOC7": "TOC 7", "TOC8": "TOC 8", "TOC9": "TOC 9",
+    "TOAHeading": "TOA Heading",
+    "NormalTable": "Normal Table",
+    "DefaultParagraphFont": "Default Paragraph Font",
+    "MacroText": "Macro Text",
+    "TableofFigures": "Table of Figures",
+    "TableofAuthorities": "Table of Authorities",
+}
+
+_CAMEL_SPLIT = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])|(?<=[A-Za-z])(?=\d)")
+
+
+def _camel_to_spaced(style_id: str) -> str:
+    """Insert spaces at lower→upper / upper→Title / letter→digit boundaries."""
+    return _CAMEL_SPLIT.sub(" ", style_id)
+
+
+def _canonical_name_from_sti(sti: int) -> str:
+    """Return the canonical English display name for a built-in STI, or ``""``."""
+    style_id = IDENTIFIER_TO_STYLE_ID.get(sti)
+    if style_id is None:
+        return ""
+    override = _DISPLAY_NAME_OVERRIDES.get(style_id)
+    if override is not None:
+        return override
+    return _camel_to_spaced(style_id)
 
 
 class StyleData:
@@ -22,15 +68,13 @@ class StyleData:
 
     def __init__(self):
         self.name: str = ""
-        self.sti: int = 0x0FFF  # standard style identifier (built-in type)
+        self.sti: int = 0x0FFF  # built-in style identifier
         self.stk: int = 0  # 1=para, 2=char, 3=table, 4=list
-        self.istd_base: int = 0x0FFF  # base style index (0xFFF = none)
-        # Paragraph format properties (from UPX1)
+        self.istd_base: int = 0x0FFF  # 0xFFF = no base
         self.para_props: ParaProps = ParaProps()
-        self.para_props_set: set[str] = set()  # which fields were explicitly set
-        # Character format properties (from UPX2 or UPX1 for char styles)
+        self.para_props_set: set[str] = set()
         self.char_props: CharProps = CharProps()
-        self.char_props_set: set[str] = set()  # which fields were explicitly set
+        self.char_props_set: set[str] = set()
 
 
 def parse_stsh(table: bytes, fc: int, lcb: int) -> dict[int, str]:
@@ -125,12 +169,16 @@ def parse_stsh_full(
             raw_name = name_bytes.decode("utf-16-le", errors="replace")
             # Use primary name only (before comma for alternate names)
             sd.name = raw_name.split(",")[0].strip()
-            # Normalize built-in style names via sti so downstream
-            # code can detect them regardless of document locale.
-            if 1 <= sd.sti <= 9:
-                sd.name = f"Heading {sd.sti}"
-            elif 19 <= sd.sti <= 27:
-                sd.name = f"TOC {sd.sti - 18}"
+            # Canonicalise via STI so localised display names map to
+            # English builtins ("רגיל" / "Обычный" → "Normal").
+            if sd.sti in STI_NAMES:
+                sd.name = STI_NAMES[sd.sti]
+            else:
+                canonical = _canonical_name_from_sti(sd.sti)
+                if canonical:
+                    sd.name = canonical
+                elif sd.name in _LOCALIZED_NAMES:
+                    sd.name = _LOCALIZED_NAMES[sd.name]
             names[i] = sd.name
         else:
             name_len = 0

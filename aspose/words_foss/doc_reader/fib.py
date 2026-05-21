@@ -2,8 +2,6 @@
 FIB (File Information Block) parser for Word 97-2003 binary format.
 """
 
-from __future__ import annotations
-
 import struct
 
 

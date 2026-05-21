@@ -1,9 +1,8 @@
 """Shape and image rendering for the PDF writer."""
 
-from __future__ import annotations
 
 from io import BytesIO
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 from fpdf import FPDF
 
@@ -21,6 +20,7 @@ from aspose.words_foss.pdf_writer.constants import (
     PT_TO_MM,
     TEXTBOX_INNER_PAD_MM,
 )
+from aspose.words_foss.pdf_writer._context import PDFWriterContext
 from aspose.words_foss.saving import PdfImageCompression
 
 try:
@@ -28,14 +28,12 @@ try:
 except ImportError:  # pragma: no cover
     _PILImage = None  # type: ignore[assignment,misc]
 
-if TYPE_CHECKING:
-    from aspose.words_foss.pdf_writer.renderer import LdmPdfWriter
 
 
 class ShapeRenderer:
     """Renders shapes, images, and positioned elements."""
 
-    def __init__(self, writer: LdmPdfWriter) -> None:
+    def __init__(self, writer: PDFWriterContext) -> None:
         self._writer = writer
 
     def compress_image_bytes(self, image_bytes: bytes) -> bytes:
@@ -103,7 +101,7 @@ class ShapeRenderer:
 
     def render_floating_images(self, pdf: FPDF, para: ldm.Paragraph) -> None:
         """Draw ``wrapNone`` images at their anchor coordinates."""
-        for extra in para.inline_extras:
+        for extra in para._children:
             if not isinstance(extra, ldm.ShapeNode):
                 continue
             if not extra.has_image or extra.image_data is None:
@@ -125,6 +123,40 @@ class ShapeRenderer:
             pdf.image(BytesIO(img_bytes), x=x, y=y, w=w_mm, h=h_mm)
             pdf.set_xy(saved_x, saved_y)
 
+    def render_anchored_wrapped_shapes(self, pdf: FPDF, para: ldm.Paragraph) -> None:
+        """Draw anchored (non-inline) shapes that wrap text around them."""
+        writer = self._writer
+        for extra in para._children:
+            if not isinstance(extra, ldm.ShapeNode):
+                continue
+            if extra._is_positioned:
+                continue
+            if extra.is_inline is not False or extra.wrap_type == WrapType.NONE:
+                continue
+            if not extra.has_image or extra.image_data is None:
+                continue
+            if id(extra) in writer._pre_rendered_shapes:
+                continue  # balancer drew this one out-of-band
+            img_bytes = extra.image_data.image_bytes
+            if not img_bytes:
+                continue
+            saved_x, saved_y = pdf.get_x(), pdf.get_y()
+            w_pt = extra.width or DEFAULT_SHAPE_DIM_PT
+            h_pt = extra.height or DEFAULT_SHAPE_DIM_PT
+            w_mm = w_pt * PT_TO_MM
+            h_mm = h_pt * PT_TO_MM
+
+            # positionH/@relativeFrom="column" is relative to the live column's left edge.
+            if extra.relative_horizontal_position == 2:
+                x = saved_x + extra.horizontal_position
+            else:
+                x = extra.left if extra.left > 0 else saved_x
+            x = max(x, writer._page_margin_left)
+            y = saved_y
+            img_bytes = self.compress_image_bytes(img_bytes)
+            pdf.image(BytesIO(img_bytes), x=x, y=y, w=w_mm, h=h_mm)
+            pdf.set_xy(saved_x, saved_y + h_mm)
+
     def render_positioned_shapes(self, pdf: FPDF, doc: ldm.Document) -> None:
         """Draw every absolutely-positioned shape on the current (first) page."""
         if not doc.sections:
@@ -144,14 +176,23 @@ class ShapeRenderer:
         *,
         line_y_override: Optional[float] = None,
     ) -> None:
-        """Draw positioned shapes carried by *paragraphs* without moving cursor."""
+        """Draw positioned shapes carried by *paragraphs* without moving cursor.
+
+        Skips shapes anchored ``relative_vertical_position == Paragraph``
+        (= 2): those need the host paragraph's actual Y at render time,
+        and are drawn by :meth:`ParagraphRenderer.render_paragraph`
+        right after the paragraph body is laid out.
+        """
         if not paragraphs:
             return
         saved_x, saved_y = pdf.get_x(), pdf.get_y()
         for para in paragraphs:
-            for extra in para.inline_extras:
-                if isinstance(extra, ldm.ShapeNode) and extra._is_positioned:
-                    self.render_positioned_shape(pdf, extra, line_y_override=line_y_override)
+            for extra in para._children:
+                if not isinstance(extra, ldm.ShapeNode) or not extra._is_positioned:
+                    continue
+                if extra.relative_vertical_position == 2:
+                    continue
+                self.render_positioned_shape(pdf, extra, line_y_override=line_y_override)
         pdf.set_xy(saved_x, saved_y)
 
     def render_positioned_shape(
@@ -160,15 +201,41 @@ class ShapeRenderer:
         shape: ldm.ShapeNode,
         *,
         line_y_override: Optional[float] = None,
+        y_override: Optional[float] = None,
     ) -> None:
-        """Draw a positioned shape at its absolute page coordinates."""
+        """Draw a positioned shape at its absolute page coordinates.
+
+        When *y_override* is supplied it replaces ``shape.top`` — used by
+        the paragraph renderer to position shapes whose
+        ``relative_vertical_position`` is *Paragraph* (the anchor Y
+        depends on where the host paragraph lands at render time).
+        """
         x = shape.left
-        y = shape.top
+        y = shape.top if y_override is None else y_override
         w = shape.width or 0.0
         h = shape.height or 0.0
 
+        # Word stores group-relative offsets in EMU; nested ``wpg:wgp``
+        # transforms accumulate sub-point rounding (e.g. 9525 EMU ≈ 0.265
+        # mm) that leaves a hairline white strip when a cover-page band is
+        # supposed to flush against the page edge.  When a fill is nominally
+        # page-spanning (within 0.5 mm on the trailing edge) snap BOTH the
+        # leading and trailing edges to the page boundary so neither side
+        # leaves a strip.
+        page_w = self._writer._page_width
+        page_h = self._writer._page_height
+        edge_eps_mm = 0.5
+        if 0.0 < x < edge_eps_mm and x + w >= page_w - edge_eps_mm:
+            right = max(x + w, page_w)
+            x = 0.0
+            w = right
+        if 0.0 < y < edge_eps_mm and y + h >= page_h - edge_eps_mm:
+            bottom = max(y + h, page_h)
+            y = 0.0
+            h = bottom
+
         # Rectangle fill and/or border.
-        fill_rgb = parse_color(shape.shading.background_color)
+        fill_rgb = parse_color(shape.shading.background_pattern_color)
         border = shape.borders[0] if shape.borders else None
         line_rgb = parse_color(border.color) if border else None
         draw_border = bool(line_rgb) and bool(border) and border.line_width > 0
@@ -220,23 +287,32 @@ class ShapeRenderer:
             saved_margin_left = writer._page_margin_left
             saved_margin_right = writer._page_margin_right
             saved_width = writer._page_width
-            pad = TEXTBOX_INNER_PAD_MM
-            pdf.set_margins(x + pad, y + pad, max(0.0, writer._page_width - (x + w - pad)))
-            writer._page_margin_left = x + pad
-            writer._page_margin_right = max(0.0, writer._page_width - (x + w - pad))
+            # Per-shape body insets from ``wps:bodyPr/@lIns…bIns`` if the
+            # reader captured them; otherwise fall back to the uniform
+            # constant so older shape data still renders.
+            insets = text_box.get("insets_mm")
+            if insets and len(insets) == 4:
+                pad_l, pad_t, pad_r, pad_b = insets
+            else:
+                pad_l = pad_t = pad_r = pad_b = TEXTBOX_INNER_PAD_MM
+            pdf.set_margins(
+                x + pad_l, y + pad_t, max(0.0, writer._page_width - (x + w - pad_r))
+            )
+            writer._page_margin_left = x + pad_l
+            writer._page_margin_right = max(0.0, writer._page_width - (x + w - pad_r))
             prev_auto = pdf.auto_page_break
             prev_bottom = pdf.b_margin
             pdf.set_auto_page_break(auto=False, margin=0)
 
             content_h = self.estimate_text_box_height(paragraphs)
-            inner_h = max(0.0, h - 2 * pad)
+            inner_h = max(0.0, h - pad_t - pad_b)
             v_offset = 0.0
             if shape.vertical_alignment == CellVerticalAlignment.CENTER and content_h < inner_h:
                 v_offset = (inner_h - content_h) / 2.0
             elif shape.vertical_alignment == CellVerticalAlignment.BOTTOM and content_h < inner_h:
                 v_offset = inner_h - content_h
 
-            pdf.set_xy(x + pad, y + pad + v_offset)
+            pdf.set_xy(x + pad_l, y + pad_t + v_offset)
             for p in paragraphs:
                 writer._paragraph_renderer.render_paragraph(pdf, p)
             pdf.set_auto_page_break(auto=prev_auto, margin=prev_bottom)

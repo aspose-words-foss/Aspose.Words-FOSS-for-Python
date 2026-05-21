@@ -7,13 +7,11 @@ and shape parsing are provided by the LdmBuilderMixin and
 ShapeParserMixin, respectively.
 """
 
-from __future__ import annotations
-
 import posixpath
 import zipfile
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Union, BinaryIO, Iterator, TYPE_CHECKING
+from typing import Optional, Union, BinaryIO, Iterator
 from xml.etree import ElementTree as ET
 
 from aspose.words_foss.docx_reader.constants import (
@@ -38,9 +36,8 @@ from aspose.words_foss.docx_reader.utils import (
 )
 from aspose.words_foss.docx_reader.ldm_builder import LdmBuilderMixin
 from aspose.words_foss.docx_reader.shapes import ShapeParserMixin
+from aspose.words_foss import light_document_model as ldm
 
-if TYPE_CHECKING:
-    from aspose.words_foss import light_document_model as ldm
 
 
 class DocumentReader(LdmBuilderMixin, ShapeParserMixin):
@@ -59,6 +56,7 @@ class DocumentReader(LdmBuilderMixin, ShapeParserMixin):
         self._numbering_cache: dict[int, NumberingInfo] = {}
         self._rels: dict[str, str] = {}  # rId -> target URL for hyperlinks
         self._style_id_to_name: dict[str, str] = {}  # style ID → display name
+        self._style_id_norm: dict[str, str] = {}  # normalized style ID → display name
         # Image support
         self._media: dict[str, bytes] = {}  # "word/media/..." -> raw bytes
         self._doc_image_rels: dict[str, str] = {}  # rId -> "word/media/..."
@@ -212,26 +210,43 @@ class DocumentReader(LdmBuilderMixin, ShapeParserMixin):
                 )
 
     def _build_style_id_map(self) -> None:
-        """Build mapping from style ID to display name from styles.xml."""
+        """Build mapping from style ID to display name from styles.xml.
+
+        Styles in real-world DOCX files occasionally omit ``<w:name>``
+        entirely (Word still accepts them); cache the styleId as the
+        display name in that case so downstream code that resolves a
+        ``<w:tblStyle w:val="a"/>`` reference doesn't hand back the
+        raw ``"a"`` token and trip the orphan-style-reference check
+        on the next round-trip.
+        """
         if self._styles_xml is None:
             return
         for style_elem in self._styles_xml.findall(f"{W_NS}style"):
             style_id = style_elem.get(f"{W_NS}styleId", "")
-            if style_id:
-                # Cache element for O(1) lookups by styleId
-                self._style_elem_cache[style_id] = style_elem
+            if not style_id:
+                continue
+            # Cache element for O(1) lookups by styleId
+            self._style_elem_cache[style_id] = style_elem
             name_elem = style_elem.find(f"{W_NS}name")
-            if name_elem is not None and style_id:
+            if name_elem is not None:
                 raw_name = name_elem.get(f"{W_NS}val", style_id)
-                # Resolve built-in style names to canonical form
-                is_custom = style_elem.get(f"{W_NS}customStyle", "") == "1"
-                self._style_id_to_name[style_id] = (
-                    raw_name if is_custom else _canonicalize_style_name(raw_name)
-                )
+            else:
+                raw_name = style_id
+            # Resolve built-in style names to canonical form
+            is_custom = style_elem.get(f"{W_NS}customStyle", "") == "1"
+            display = raw_name if is_custom else _canonicalize_style_name(raw_name)
+            self._style_id_to_name[style_id] = display
+            norm = style_id.replace(" ", "").lower()
+            if norm not in self._style_id_norm:
+                self._style_id_norm[norm] = display
 
     def _resolve_style_name(self, style_id: str) -> str:
         """Resolve a style ID to its display name."""
-        return self._style_id_to_name.get(style_id, style_id)
+        name = self._style_id_to_name.get(style_id)
+        if name is not None:
+            return name
+        norm = style_id.replace(" ", "").lower()
+        return self._style_id_norm.get(norm, style_id)
 
     def _parse_theme(self, theme_root: ET.Element) -> None:
         """Parse theme XML to resolve theme fonts and colors."""
@@ -301,8 +316,8 @@ class DocumentReader(LdmBuilderMixin, ShapeParserMixin):
     def _apply_theme_color_modifiers(
         base_hex: str,
         *,
-        tint: "str | None" = None,
-        shade: "str | None" = None,
+        tint: str | None = None,
+        shade: str | None = None,
     ) -> str:
         """Apply ``w:themeTint`` / ``w:themeShade`` modifiers to a base RGB.
 

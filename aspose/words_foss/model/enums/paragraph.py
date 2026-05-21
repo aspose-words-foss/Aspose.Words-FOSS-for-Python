@@ -1,10 +1,8 @@
-"""Paragraph-related enums mirroring Aspose.Words."""
+"""Paragraph-related enums."""
 
 
 class ParagraphAlignment:
     """Specifies text alignment in a paragraph.
-
-    Mirrors ``Aspose.Words.ParagraphAlignment``.
     """
 
     LEFT = 0
@@ -21,8 +19,6 @@ class ParagraphAlignment:
 
 class LineSpacingRule:
     """Specifies values for line spacing.
-
-    Mirrors ``Aspose.Words.LineSpacingRule``.
     """
 
     AT_LEAST = 0

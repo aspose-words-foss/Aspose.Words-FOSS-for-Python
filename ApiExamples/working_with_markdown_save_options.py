@@ -1,8 +1,8 @@
 """
 API examples for MarkdownSaveOptions.
 
-Only demonstrates options that are actually applied during conversion.
-Currently: export_underline_formatting.
+Demonstrates options that are actually applied during conversion:
+export_underline_formatting, encoding, paragraph_break.
 
 Mirrors the Aspose.Words for Python DocsExamples:
   file_formats_and_conversions/save_options/working_with_markdown_save_options.py
@@ -37,6 +37,38 @@ class WorkingWithMarkdownSaveOptions(DocsExamplesBase):
         )
         # ExEnd:ExportUnderlineFormatting
 
+    def test_set_encoding(self):
+        # ExStart:SetEncoding
+        save_options = aw.saving.MarkdownSaveOptions()
+        save_options.encoding = "utf-8-sig"
+
+        self.convert(
+            "test_full_article.docx",
+            "MarkdownSaveOptions.encoding_utf8_bom.md",
+            save_options=save_options,
+        )
+        # ExEnd:SetEncoding
+
+        output = Path(ARTIFACTS_DIR) / "MarkdownSaveOptions.encoding_utf8_bom.md"
+        raw = output.read_bytes()
+        assert raw[:3] == b"\xef\xbb\xbf", "UTF-8 BOM expected"
+
+    def test_set_paragraph_break(self):
+        # ExStart:SetParagraphBreak
+        save_options = aw.saving.MarkdownSaveOptions()
+        save_options.paragraph_break = "\r\n"
+
+        self.convert(
+            "test_full_article.docx",
+            "MarkdownSaveOptions.paragraph_break_crlf.md",
+            save_options=save_options,
+        )
+        # ExEnd:SetParagraphBreak
+
+        output = Path(ARTIFACTS_DIR) / "MarkdownSaveOptions.paragraph_break_crlf.md"
+        content = output.read_bytes()
+        assert b"\r\n" in content, "CRLF line endings expected"
+
     def test_markdown_from_all_input_formats(self):
         """Save DOC, DOCX, RTF, TXT as Markdown with default options."""
         inputs = {
@@ -60,6 +92,10 @@ if __name__ == "__main__":
     print("=== Markdown Save Options Examples ===\n")
     examples.test_export_underline_formatting()
     print("  export_underline_formatting: Done.")
+    examples.test_set_encoding()
+    print("  set_encoding: Done.")
+    examples.test_set_paragraph_break()
+    print("  set_paragraph_break: Done.")
     examples.test_markdown_from_all_input_formats()
     print("  markdown_from_all_input_formats: Done.")
     print(f"\nOutput files are in: {ARTIFACTS_DIR}")

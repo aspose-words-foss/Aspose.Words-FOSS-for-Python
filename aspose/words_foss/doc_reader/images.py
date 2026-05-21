@@ -5,8 +5,6 @@ Parses Escher BSE (Blip Store Entry) records, shape-to-blip mappings,
 and PlcSpaMom/PlcSpaHdr shape anchors.
 """
 
-from __future__ import annotations
-
 import struct
 
 from aspose.words_foss.doc_reader.constants import (

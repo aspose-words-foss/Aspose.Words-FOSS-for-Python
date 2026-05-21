@@ -1,25 +1,14 @@
-"""Document-model enums mirroring Aspose.Words core enumerations.
-
-Each class uses plain integer constants (not ``enum.Enum``) to match
-the Aspose.Words API convention where enum values are bare ints
-serialisable to/from JSON without adapter logic.
-
-Enums are organised into domain-specific modules:
-
-- ``paragraph`` — ParagraphAlignment, LineSpacingRule
-- ``style`` — StyleType, NumberStyle
-- ``font`` — Underline
-- ``layout`` — HeightRule, SectionStart, Orientation
-- ``border`` — LineStyle
-- ``table`` — CellMerge, CellVerticalAlignment
-"""
+"""Document-model enums (bare-int values, no Python ``Enum`` subclassing)."""
 
 from aspose.words_foss.model.enums.paragraph import (  # noqa: F401
     ParagraphAlignment,
     LineSpacingRule,
 )
 from aspose.words_foss.model.enums.style import (  # noqa: F401
+    StyleIdentifier,
     StyleType,
+    TabAlignment,
+    TabLeader,
     NumberStyle,
 )
 from aspose.words_foss.model.enums.font import Underline  # noqa: F401

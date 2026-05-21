@@ -6,9 +6,7 @@ group shape hierarchies.  These are mixed into DocumentReader
 via multiple inheritance.
 """
 
-from __future__ import annotations
-
-from typing import Optional, Iterator, TYPE_CHECKING
+from typing import Optional, Iterator
 from xml.etree import ElementTree as ET
 
 from aspose.words_foss.docx_reader.constants import (
@@ -32,13 +30,13 @@ from aspose.words_foss.docx_reader.constants import (
     _POINTS_PER_INCH,
     COLOR_EMPTY,
 )
+from aspose.words_foss import light_document_model as ldm
 from aspose.words_foss.docx_reader.utils import (
     _ext_to_content_type,
-    _hex_to_aspose_color,
+    _hex_to_ldm_color,
 )
+from aspose.words_foss.model.wrap_type import WrapType
 
-if TYPE_CHECKING:
-    from aspose.words_foss import light_document_model as ldm
 
 
 class ShapeParserMixin:
@@ -47,15 +45,13 @@ class ShapeParserMixin:
     # These attributes are defined on DocumentReader but referenced here.
     _media: dict[str, bytes]
     _doc_image_rels: dict[str, str]
-    _current_page_setup: "Optional[ldm.PageSetup]"
+    _current_page_setup: Optional[ldm.PageSetup]
     _theme_colors: dict[str, str]
 
     def _build_drawing_shape(
         self, drawing_elem: ET.Element, image_rels: dict[str, str]
-    ) -> "Optional[ldm.ShapeNode]":
+    ) -> Optional[ldm.ShapeNode]:
         """Parse a <w:drawing> element and return a ShapeNode if it contains an image."""
-        from aspose.words_foss import light_document_model as ldm
-
         inline = drawing_elem.find(f"{WP_NS}inline")
         anchor = drawing_elem.find(f"{WP_NS}anchor")
         container = inline if inline is not None else anchor
@@ -106,13 +102,16 @@ class ShapeParserMixin:
         if image_bytes is None:
             return None
 
-        # Prefer the original name from pic:cNvPr[@name] if available
+        # Prefer the original name from pic:cNvPr[@name] if available;
+        # always resolve content_type from the on-disk media path so the
+        # extension is reliable (cNvPr names are user-facing labels and
+        # rarely include an extension, e.g. ``"Picture 2"``).
         cNvPr = container.find(f".//{PIC_NS}cNvPr")
         if cNvPr is not None and cNvPr.get("name"):
             filename = cNvPr.get("name", "")
         else:
             filename = media_path.rsplit("/", 1)[-1]
-        content_type = _ext_to_content_type(filename)
+        content_type = _ext_to_content_type(media_path.rsplit("/", 1)[-1])
 
         shape = ldm.ShapeNode()
         shape.has_image = True
@@ -124,6 +123,23 @@ class ShapeParserMixin:
             content_type=content_type,
             image_bytes=image_bytes,
         )
+
+        # Crop insets from <a:srcRect> (1/1000th percent per side)
+        src_rect = container.find(f".//{A_NS}srcRect")
+        if src_rect is not None:
+            for attr, field in (
+                ("l", "crop_left"),
+                ("t", "crop_top"),
+                ("r", "crop_right"),
+                ("b", "crop_bottom"),
+            ):
+                val = src_rect.get(attr)
+                if val:
+                    try:
+                        setattr(shape.image_data, field, int(val))
+                    except ValueError:
+                        pass
+
         if textbox_paragraphs:
             shape.text_box = {"paragraphs": textbox_paragraphs}
 
@@ -145,6 +161,7 @@ class ShapeParserMixin:
             shape.top = top_mm
             # Parse wrap type from the anchor element.
             shape.wrap_type = self._parse_wrap_type(anchor)
+            self._apply_anchor_metadata(shape, anchor)
             if promote:
                 if width_pt:
                     shape.width = width_pt / _POINTS_PER_INCH * _MM_PER_INCH  # pt → mm
@@ -153,14 +170,79 @@ class ShapeParserMixin:
                 shape._is_positioned = True
         return shape
 
+    # ``positionH/@relativeFrom`` token → RelativeHorizontalPosition int.
+    _H_REL_FROM = {
+        "margin": 0, "page": 1, "column": 2, "character": 3,
+        "leftMargin": 4, "rightMargin": 5,
+        "insideMargin": 6, "outsideMargin": 7,
+    }
+    # ``positionV/@relativeFrom`` token → RelativeVerticalPosition int.
+    _V_REL_FROM = {
+        "margin": 0, "page": 1, "paragraph": 2, "line": 3,
+        "topMargin": 4, "bottomMargin": 5,
+        "insideMargin": 6, "outsideMargin": 7,
+    }
+    # ``positionH/wp:align`` → ``HorizontalAlignment`` enum.
+    _H_ALIGN = {"left": 1, "center": 2, "right": 3, "inside": 4, "outside": 5}
+    # ``positionV/wp:align`` → ``VerticalAlignment`` enum.
+    _V_ALIGN = {"top": 1, "center": 2, "bottom": 3, "inside": 4, "outside": 5}
+
+    @classmethod
+    def _apply_anchor_metadata(cls, shape: "ldm.ShapeNode", anchor: ET.Element) -> None:
+        """Populate LDM-compatible anchor fields on *shape*.
+
+        Captures the metadata Word stores on ``<wp:anchor>`` so a
+        consumer can read the relative-from / align / overlap / behindDoc
+        flags directly off the LDM instead of inferring them from the
+        already-resolved ``left`` / ``top`` mm values.
+        """
+        posH = anchor.find(f"{WP_NS}positionH")
+        if posH is not None:
+            shape.relative_horizontal_position = cls._H_REL_FROM.get(
+                posH.get("relativeFrom", "margin"), 0
+            )
+            off = posH.find(f"{WP_NS}posOffset")
+            if off is not None and off.text:
+                try:
+                    shape.horizontal_position = int(off.text) / _EMU_PER_PT
+                except ValueError:
+                    pass
+            align = posH.find(f"{WP_NS}align")
+            if align is not None and align.text:
+                shape.horizontal_alignment = cls._H_ALIGN.get(align.text.strip(), 0)
+        posV = anchor.find(f"{WP_NS}positionV")
+        if posV is not None:
+            shape.relative_vertical_position = cls._V_REL_FROM.get(
+                posV.get("relativeFrom", "margin"), 0
+            )
+            off = posV.find(f"{WP_NS}posOffset")
+            if off is not None and off.text:
+                try:
+                    shape.vertical_position = int(off.text) / _EMU_PER_PT
+                except ValueError:
+                    pass
+            align = posV.find(f"{WP_NS}align")
+            if align is not None and align.text:
+                shape.vertical_anchor_alignment = cls._V_ALIGN.get(align.text.strip(), 0)
+        # CT_OnOff-ish flags carry their default when the attribute is
+        # absent.  ``behindDoc`` / ``locked`` default to ``0``;
+        # ``allowOverlap`` / ``layoutInCell`` default to ``1``.
+        def _flag(name: str, default: bool) -> bool:
+            v = anchor.get(name)
+            if v is None: return default
+            return v not in ("0", "false")
+        shape.behind_text = _flag("behindDoc", False)
+        shape.allow_overlap = _flag("allowOverlap", True)
+        shape.layout_in_cell = _flag("layoutInCell", True)
+        shape.is_locked = _flag("locked", False)
+
     @staticmethod
     def _parse_wrap_type(anchor: ET.Element) -> int:
-        """Return the Aspose-compatible WrapType integer from a ``<wp:anchor>``.
+        """Return the LDM-compatible WrapType integer from a ``<wp:anchor>``.
 
-        Matches Aspose.Words WrapType enum:
+        WrapType integer values:
         0=Inline, 1=TopBottom, 2=Square, 3=None, 4=Tight, 5=Through.
         """
-        from aspose.words_foss.model.wrap_type import WrapType
 
         _WRAP_MAP = {
             f"{WP_NS}wrapNone": WrapType.NONE,
@@ -180,7 +262,7 @@ class ShapeParserMixin:
 
     def _extract_positioned_shapes(
         self, drawing_elem: ET.Element, image_rels: dict[str, str]
-    ) -> "list[ldm.ShapeNode]":
+    ) -> list[ldm.ShapeNode]:
         """Return positioned ShapeNodes for an anchored shape drawing.
 
         Word cover pages and other layouts express their visual elements
@@ -198,8 +280,6 @@ class ShapeParserMixin:
         Returns an empty list for simple picture anchors (those stay on
         the inline path via :meth:`_build_drawing_shape`).
         """
-        from aspose.words_foss import light_document_model as ldm
-
         anchor = drawing_elem.find(f"{WP_NS}anchor")
         if anchor is None:
             return []
@@ -217,6 +297,20 @@ class ShapeParserMixin:
                 image_rels=image_rels,
                 out=shapes,
             )
+            # Carry anchor-level metadata (wrap, relativeFrom, flags)
+            # onto every shape extracted from the group.  ``horizontal_position``
+            # / ``vertical_position`` are *group-level* — each child's
+            # individual offset already lives in ``left`` / ``top`` (mm)
+            # after the group walk composed them.  Don't propagate the
+            # shared anchor offset onto children or the writer's
+            # ``has_anchor_metadata`` branch picks it over the per-child
+            # mm coords and stacks every shape at the group's origin.
+            wrap = self._parse_wrap_type(anchor)
+            for s in shapes:
+                s.wrap_type = wrap
+                self._apply_anchor_metadata(s, anchor)
+                s.horizontal_position = 0.0
+                s.vertical_position = 0.0
             return shapes
 
         # Single wps:wsp directly under wp:anchor (no group wrapper).
@@ -245,6 +339,9 @@ class ShapeParserMixin:
             width=width_mm,
             height=height_mm,
         )
+        if shape is not None:
+            shape.wrap_type = self._parse_wrap_type(anchor)
+            self._apply_anchor_metadata(shape, anchor)
         return [shape] if shape is not None else []
 
     def _anchor_page_origin_mm(self, anchor: ET.Element) -> tuple[float, float]:
@@ -447,10 +544,10 @@ class ShapeParserMixin:
     ) -> "Optional[ldm.ShapeNode]":
         """Build a positioned ShapeNode from a ``<wps:wsp>`` at known coords.
 
-        Populates the standard Aspose.Words ShapeNode fields:
+        Populates the standard ShapeNode fields:
           * ``left`` / ``top`` / ``width`` / ``height`` — absolute page
             position and size in mm;
-          * ``shading.background_color`` — solid fill, honouring both
+          * ``shading.background_pattern_color`` — solid fill, honouring both
             literal ``a:srgbClr`` and theme ``a:schemeClr`` references;
           * single ``borders`` entry — outline color + width from
             ``a:ln`` (same color resolver);
@@ -462,8 +559,6 @@ class ShapeParserMixin:
         writer can pick the shape up for absolute rendering.  Returns
         ``None`` for empty shapes that carry nothing worth rendering.
         """
-        from aspose.words_foss import light_document_model as ldm
-
         fill_hex = ""
         line_hex = ""
         line_width_pt = 0.0
@@ -486,9 +581,36 @@ class ShapeParserMixin:
         # b=bottom.  Map onto the 0/1/2 convention used by the rest of
         # the LDM (CellFormat.vertical_alignment).
         vertical_alignment = 0
+        # OOXML defaults per ECMA-376 (in EMU): lIns/rIns = 91440 (2.54mm),
+        # tIns/bIns = 45720 (1.27mm).
+        ins_left_mm = 91440 / _EMU_PER_MM
+        ins_right_mm = 91440 / _EMU_PER_MM
+        ins_top_mm = 45720 / _EMU_PER_MM
+        ins_bottom_mm = 45720 / _EMU_PER_MM
         body_pr = wsp.find(f"{WPS_NS}bodyPr")
         if body_pr is not None:
             vertical_alignment = _BODY_ANCHOR_MAP.get(body_pr.get("anchor", "t"), 0)
+            for attr, target in (
+                ("lIns", "ins_left_mm"),
+                ("rIns", "ins_right_mm"),
+                ("tIns", "ins_top_mm"),
+                ("bIns", "ins_bottom_mm"),
+            ):
+                raw = body_pr.get(attr)
+                if raw is None:
+                    continue
+                try:
+                    val_mm = int(raw) / _EMU_PER_MM
+                except ValueError:
+                    continue
+                if target == "ins_left_mm":
+                    ins_left_mm = val_mm
+                elif target == "ins_right_mm":
+                    ins_right_mm = val_mm
+                elif target == "ins_top_mm":
+                    ins_top_mm = val_mm
+                elif target == "ins_bottom_mm":
+                    ins_bottom_mm = val_mm
 
         textbox_paragraphs: list[ldm.Paragraph] = []
         txbx = wsp.find(f"{WPS_NS}txbx")
@@ -509,18 +631,21 @@ class ShapeParserMixin:
         shape.width = width
         shape.height = height
         if fill_hex:
-            shape.shading = ldm.Shading(background_color=_hex_to_aspose_color(fill_hex))
+            shape.shading = ldm.Shading(background_pattern_color=_hex_to_ldm_color(fill_hex))
         if line_hex or line_width_pt > 0:
             shape.borders = [
                 ldm.Border(
                     line_style=1 if line_hex and line_width_pt > 0 else 0,
                     line_width=line_width_pt,
-                    color=_hex_to_aspose_color(line_hex) if line_hex else COLOR_EMPTY,
+                    color=_hex_to_ldm_color(line_hex) if line_hex else COLOR_EMPTY,
                 )
             ]
         shape.vertical_alignment = vertical_alignment
         if textbox_paragraphs:
-            shape.text_box = {"paragraphs": textbox_paragraphs}
+            shape.text_box = {
+                "paragraphs": textbox_paragraphs,
+                "insets_mm": (ins_left_mm, ins_top_mm, ins_right_mm, ins_bottom_mm),
+            }
         shape._is_positioned = True
         return shape
 
@@ -610,7 +735,7 @@ class ShapeParserMixin:
                 continue
             stack.extend(node)
 
-    def _harvest_textbox_paragraphs(self, drawing_or_pict: ET.Element) -> list["ldm.Paragraph"]:
+    def _harvest_textbox_paragraphs(self, drawing_or_pict: ET.Element) -> list[ldm.Paragraph]:
         """Collect paragraphs from Word text boxes inside a drawing/picture.
 
         DrawingML (``wps:txbx``) and legacy VML (``v:textbox``) both wrap
@@ -620,8 +745,6 @@ class ShapeParserMixin:
         silently dropped because the reader only extracts pictures from
         ``<w:drawing>``.
         """
-        from aspose.words_foss import light_document_model as ldm  # noqa: F401
-
         paragraphs: list[ldm.Paragraph] = []
         # ``<w:txbxContent>`` may live at any depth inside the drawing/pict
         # and its paragraphs may themselves be wrapped in content controls
@@ -632,20 +755,14 @@ class ShapeParserMixin:
                     paragraphs.append(self._build_ldm_paragraph(element))
         return paragraphs
 
-    # The following methods are provided by DocumentReader or LdmBuilderMixin
-    # at runtime via multiple inheritance.  They are declared here only for
-    # static type checkers and are guarded behind TYPE_CHECKING so they
-    # never shadow the real implementations.
-    if TYPE_CHECKING:
+    def _resolve_body_children(
+        self, parent: ET.Element
+    ) -> Iterator[ET.Element]: ...
 
-        def _resolve_body_children(
-            self, parent: ET.Element
-        ) -> Iterator[ET.Element]: ...
+    def _build_ldm_paragraph(
+        self,
+        p_elem: ET.Element,
+        image_rels: "Optional[dict[str, str]]" = None,
+    ) -> "ldm.Paragraph": ...
 
-        def _build_ldm_paragraph(
-            self,
-            p_elem: ET.Element,
-            image_rels: "Optional[dict[str, str]]" = None,
-        ) -> "ldm.Paragraph": ...
-
-        def _resolve_theme_color(self, scheme_name: str) -> str: ...
+    def _resolve_theme_color(self, scheme_name: str) -> str: ...

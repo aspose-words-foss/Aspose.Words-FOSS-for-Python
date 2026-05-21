@@ -6,6 +6,6 @@ continue to work without changes.
 """
 
 from aspose.words_foss.pdf_writer.color import parse_color as _parse_color
-from aspose.words_foss.pdf_writer.renderer import LdmPdfWriter
+from aspose.words_foss.pdf_writer.writer import LdmPdfWriter
 
 __all__ = ["LdmPdfWriter", "_parse_color"]

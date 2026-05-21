@@ -47,7 +47,7 @@ from aspose.words_foss.docx_reader.utils import (
     _collect_run_text,
     _empty_borders,
     _ext_to_content_type,
-    _hex_to_aspose_color,
+    _hex_to_ldm_color,
 )
 from aspose.words_foss.docx_reader.document_reader import DocumentReader
 
@@ -78,7 +78,7 @@ __all__ = [
     "_collect_run_text",
     "_empty_borders",
     "_ext_to_content_type",
-    "_hex_to_aspose_color",
+    "_hex_to_ldm_color",
     # Mapping constants (re-exported for backward compat)
     "_ALIGNMENT_MAP",
     "_BODY_ANCHOR_MAP",

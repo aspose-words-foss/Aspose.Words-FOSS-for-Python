@@ -2,8 +2,6 @@
 Table text parser for DOC files.
 """
 
-from __future__ import annotations
-
 from aspose.words_foss.docx_reader import (
     CellData,
     ParagraphData,
