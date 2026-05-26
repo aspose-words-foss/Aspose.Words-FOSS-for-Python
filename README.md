@@ -1,6 +1,6 @@
 # Aspose.Words FOSS
 
-A lightweight, open-source Python library for converting DOCX, DOC, RTF, TXT, and MD files to Markdown, plain text, and PDF without requiring Microsoft Word.
+A lightweight, open-source Python library for converting DOCX, DOC, RTF, TXT, and MD files to DOCX, Markdown, plain text, and PDF without requiring Microsoft Word.
 
 A free, lightweight version of [Aspose.Words for Python via .NET](https://github.com/aspose-words/Aspose.Words-for-Python-via-.NET) with a compatible API (`Document`, `SaveFormat`, `SaveOptions`).
 
@@ -9,15 +9,23 @@ A free, lightweight version of [Aspose.Words for Python via .NET](https://github
 
 ## Features
 
-- **DOCX Support**: Pure Python reader using only the standard library (`zipfile`, `xml.etree`)
+- **DOCX Read/Write**: Pure Python reader using only the standard library (`zipfile`, `xml.etree`)
 - **DOC Support**: Word 97-2003 binary format reader via `olefile`
 - **RTF Support**: Rich Text Format reader via OLE2 delegation
 - **Plain Text & Markdown Input**: Read `.txt` and `.md` files
-- **Markdown Export**: Rich formatting — headings, bold/italic/strikethrough/underline, ordered and unordered lists (including nested), tables, block quotes, code blocks, and hyperlinks
-- **PDF Export**: Generate PDF output via `fpdf2`
+- **Markdown Export**: Rich formatting — headings, bold/italic/strikethrough/underline, ordered and unordered lists (including nested), tables, block quotes, code blocks, and hyperlinks. Encoding and paragraph break sequence are configurable
+- **PDF Export**: Generate PDF output via `fpdf2`. Applied `PdfSaveOptions` fields: `compliance`, `image_compression`, `jpeg_quality`, `outline_options`, `export_document_structure`, `export_bookmarks_outline`, `zoom_behavior`, `zoom_factor`, `display_doc_title`
 - **Plain Text Export**: Extract document text content
 
 ## Installation
+
+From PyPI:
+
+```bash
+pip install aspose-words-foss
+```
+
+Nightly (latest from GitHub):
 
 ```bash
 pip install git+https://github.com/aspose-words-foss/Aspose.Words-FOSS-for-Python.git
@@ -43,6 +51,15 @@ doc = aw.Document("input.docx")
 doc.save("output.pdf", aw.SaveFormat.PDF)
 ```
 
+### Export to DOCX
+
+```python
+import aspose.words_foss as aw
+
+doc = aw.Document("input.docx")  # or .doc, .rtf
+doc.save("output.docx", aw.SaveFormat.DOCX)
+```
+
 ### Extract plain text
 
 ```python
@@ -56,13 +73,26 @@ text = doc.get_text()
 
 ```python
 import aspose.words_foss as aw
-from aspose.words_foss.saving import MarkdownSaveOptions, PdfSaveOptions
+from aspose.words_foss.saving import (
+    MarkdownSaveOptions,
+    OoxmlSaveOptions,
+    PdfSaveOptions,
+    CompressionLevel,
+)
 
 doc = aw.Document("input.docx")
 
+# Markdown: underline, encoding, paragraph break
 md_opts = MarkdownSaveOptions()
 md_opts.export_underline_formatting = True
+md_opts.encoding = "utf-8-sig"        # write a UTF-8 BOM
+md_opts.paragraph_break = "\r\n"      # CRLF between paragraphs
 doc.save("output.md", md_opts)
+
+# DOCX: compression level
+ooxml_opts = OoxmlSaveOptions()
+ooxml_opts.compression_level = CompressionLevel.MAXIMUM
+doc.save("output.docx", ooxml_opts)
 
 pdf_opts = PdfSaveOptions()
 doc.save("output.pdf", pdf_opts)
@@ -85,7 +115,8 @@ ApiExamples folder
 | File | What it shows |
 |------|---------------|
 | `convert_document.py` | Every input format (DOCX, DOC, RTF, TXT, MD) to every output format (Markdown, PDF, TXT) |
-| `working_with_markdown_save_options.py` | `MarkdownSaveOptions` — only options that are actually applied |
+| `working_with_markdown_save_options.py` | `MarkdownSaveOptions` — `export_underline_formatting`, `encoding`, `paragraph_break` |
+| `working_with_ooxml_save_options.py` | `OoxmlSaveOptions` for DOCX export — `pretty_format`, `compression_level` |
 | `working_with_pdf_save_options.py` | PDF export from all input formats |
 | `working_with_txt_save_options.py` | Plain-text export and `get_text()` |
 | `working_with_images.py` | Image-containing documents to all output formats |

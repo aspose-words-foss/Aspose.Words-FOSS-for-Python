@@ -3,17 +3,41 @@ name = "aspose-words-foss"
 version = "26.5.0"
 description = "Lightweight free open-source alternative to Aspose.Words — convert DOCX, DOC, RTF to Markdown, text, and PDF"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     {name = "Aspose"}
 ]
-
+keywords = [
+    "word", "docx", "doc", "rtf", "markdown", "pdf",
+    "aspose", "office", "openxml", "document", "convert",
+]
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "olefile>=0.46",
     "fpdf2>=2.7.0",
     "pydantic>=2.0.0",
 ]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Markup",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/aspose-words-foss/Aspose.Words-FOSS-for-Python"
+Repository = "https://github.com/aspose-words-foss/Aspose.Words-FOSS-for-Python"
+Issues = "https://github.com/aspose-words-foss/Aspose.Words-FOSS-for-Python/issues"
 
 [project.optional-dependencies]
 dev = [
