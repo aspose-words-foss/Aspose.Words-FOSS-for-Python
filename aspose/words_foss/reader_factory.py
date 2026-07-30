@@ -33,9 +33,9 @@ def create_reader(suffix: str) -> DocumentFormatReader:
         A reader instance implementing the DocumentFormatReader protocol.
     """
     if suffix == ".md":
-        from aspose.words_foss.text_reader import MarkdownFileReader
+        from aspose.words_foss.markdown_reader import MarkdownReader
 
-        return MarkdownFileReader()
+        return MarkdownReader()
     elif suffix == ".txt":
         from aspose.words_foss.text_reader import TextFileReader
 

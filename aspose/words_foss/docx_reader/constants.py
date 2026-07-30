@@ -21,6 +21,7 @@ from aspose.words_foss.model.enums import (
 
 W_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+V_NS = "{urn:schemas-microsoft-com:vml}"
 WP_NS = "{http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing}"
 A_NS = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 PIC_NS = "{http://schemas.openxmlformats.org/drawingml/2006/picture}"
@@ -112,7 +113,7 @@ PAGE_FIELD_SENTINEL = "\x00PAGE\x00"
 # MAPPING CONSTANTS
 # =============================================================================
 
-# DrawingML ``wps:bodyPr/@anchor`` → LDM ``vertical_alignment`` int.
+# DrawingML ``wps:bodyPr/@anchor`` → LDM ``text_box_anchor`` int.
 _BODY_ANCHOR_MAP: dict[str, int] = {
     "t": _CVA.TOP,
     "ctr": _CVA.CENTER,

@@ -13,12 +13,16 @@ from pathlib import Path
 # Root of the project
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Ensure project root is on sys.path for standalone script execution
+# Appended, never prepended: the project root holds an `aspose/` package that
+# would otherwise shadow an installed `aspose.words` wheel.
 if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+    sys.path.append(str(_PROJECT_ROOT))
 
 # Input data directory (reuse test fixtures)
 MY_DIR = str(_PROJECT_ROOT / "tests" / "data" / "input") + os.sep
+
+# Private / manual fixtures (real-world docs used for visual regression checks)
+MANUAL_DIR = str(_PROJECT_ROOT / "tests" / "data" / "manual") + os.sep
 
 # Output directory for generated files
 ARTIFACTS_DIR = str(_PROJECT_ROOT / "ApiExamples" / "output") + os.sep
@@ -68,3 +72,4 @@ class DocsExamplesBase:
         doc = aw.Document(MY_DIR + input_file)
         for ext, fmt in fmt_map.items():
             doc.save(ARTIFACTS_DIR + output_prefix + ext, fmt)
+

@@ -9,6 +9,7 @@ from typing import Any, Optional, Protocol, Union
 
 from fpdf import FPDF
 
+from aspose.words_foss import light_document_model as ldm
 from aspose.words_foss.saving import PdfSaveOptions
 
 
@@ -30,3 +31,7 @@ class PDFWriterContext(Protocol):
     _table_renderer: Any
 
     def _link_target_for(self, pdf: FPDF, url: Optional[str]) -> Union[int, str]: ...
+
+    def _estimate_child_height(
+        self, child: Union[ldm.Paragraph, ldm.Table], col_w_mm: float
+    ) -> float: ...

@@ -28,7 +28,7 @@ from aspose.words_foss.docx_reader.utils import _canonicalize_style_name
 from aspose.words_foss.model.style_identifiers import resolve_style_identifier
 
 from ._context import ReaderContext
-from ._helpers import apply_padding_sides, build_borders, parse_int
+from ._helpers import apply_padding_sides, build_borders, build_shading, find_val, parse_int
 from .cascading import (
     FontBuilder,
     FontResolver,
@@ -39,6 +39,31 @@ from .cascading import (
 
 _STYLE_TYPE_PARAGRAPH = 1
 _STYLE_TYPE_TABLE = 3
+
+
+def _tsp_build_font(rPr: ET.Element) -> ldm.Font:
+    """Lightweight font builder for ``<w:tblStylePr>`` rPr elements."""
+    from aspose.words_foss.docx_reader.field_mappings import RUN_ONOFF_FLAGS
+    from aspose.words_foss.docx_reader.utils import apply_onoff_attrs, _hex_to_ldm_color
+    font = ldm.Font()
+    apply_onoff_attrs(font, rPr, RUN_ONOFF_FLAGS)
+    rFonts = rPr.find(f"{W_NS}rFonts")
+    if rFonts is not None:
+        font.name = rFonts.get(f"{W_NS}ascii", "") or rFonts.get(f"{W_NS}hAnsi", "") or ""
+    color_el = rPr.find(f"{W_NS}color")
+    if color_el is not None:
+        val = color_el.get(f"{W_NS}val", "")
+        if val and val.lower() != "auto":
+            font.color = _hex_to_ldm_color(val)
+    sz_val = find_val(rPr, "sz")
+    if sz_val:
+        try:
+            font.size = int(sz_val) / 2.0
+        except ValueError:
+            pass
+    return font
+
+
 _BUILTIN_HEADING_MAX = 9
 
 
@@ -82,6 +107,7 @@ class StyleBuilder:
         s.type = _STYLE_TYPE_MAP.get(style_elem.get(f"{W_NS}type", ""), 0)
         self._apply_identifier(s, xml_style_id, is_custom)
         self._apply_priority(style_elem, s)
+        self._apply_style_flags(style_elem, s)
         heading_match = self._apply_heading_flag(s)
         self._apply_relations(style_elem, s)
         self._apply_format(style_elem, s, xml_style_id, heading_match)
@@ -117,6 +143,15 @@ class StyleBuilder:
         ui_pri = style_elem.find(f"{W_NS}uiPriority")
         if ui_pri is not None:
             s.priority = parse_int(ui_pri.get(f"{W_NS}val", "99"), 99)
+
+    @staticmethod
+    def _apply_style_flags(style_elem: ET.Element, s: ldm.Style) -> None:
+        if style_elem.find(f"{W_NS}semiHidden") is not None:
+            s.semi_hidden = True
+        if style_elem.find(f"{W_NS}unhideWhenUsed") is not None:
+            s.unhide_when_used = True
+        if style_elem.find(f"{W_NS}locked") is not None:
+            s.locked = True
 
     @staticmethod
     def _apply_heading_flag(s: ldm.Style) -> Optional[re.Match[str]]:
@@ -179,7 +214,7 @@ class StyleBuilder:
             pf.outline_level = int(heading_match.group(1)) - 1
 
     @staticmethod
-    def _apply_table_style_format(style_elem: ET.Element, s: ldm.Style) -> None:
+    def _apply_table_style_format(style_elem: ET.Element, s: ldm.Style) -> None:  # noqa: C901
         if s.type != _STYLE_TYPE_TABLE:
             return
         tblPr = style_elem.find(f"{W_NS}tblPr")
@@ -203,6 +238,33 @@ class StyleBuilder:
         if not has_borders:
             tsf.borders = []
         s.table_style_format = tsf
+
+        for tsp_el in style_elem.findall(f"{W_NS}tblStylePr"):
+            tsp_type = tsp_el.get(f"{W_NS}type", "")
+            if not tsp_type:
+                continue
+            tsp = ldm.TableStyleProperty(type=tsp_type)
+            rPr = tsp_el.find(f"{W_NS}rPr")
+            if rPr is not None:
+                tsp.font = _tsp_build_font(rPr)
+            pPr = tsp_el.find(f"{W_NS}pPr")
+            if pPr is not None:
+                jc = pPr.find(f"{W_NS}jc")
+                if jc is not None:
+                    from aspose.words_foss.docx_reader.constants import _ALIGNMENT_MAP
+                    tsp.paragraph_format = ldm.ParagraphFormat(
+                        alignment=_ALIGNMENT_MAP.get(jc.get(f"{W_NS}val", ""), 0)
+                    )
+            tcPr = tsp_el.find(f"{W_NS}tcPr")
+            if tcPr is not None:
+                shd = tcPr.find(f"{W_NS}shd")
+                if shd is not None:
+                    tsp.shading = build_shading(shd)
+                tcBorders = tcPr.find(f"{W_NS}tcBorders")
+                if tcBorders is not None:
+                    tsp.borders = build_borders(tcBorders)
+            if tsp.font or tsp.shading or tsp.borders or tsp.paragraph_format:
+                s.table_style_properties.append(tsp)
 
 
 class ListBuilder:
@@ -320,7 +382,7 @@ class ListBuilder:
             abs_id = parse_int(abs_id_elem.get(f"{W_NS}val", "0"))
             dl = ldm.DocList()
             dl.list_id = num_id
-            dl.levels = list(abstract_defs.get(abs_id, []))
+            dl.list_levels = list(abstract_defs.get(abs_id, []))
             dl.is_multi_level = abstract_multi.get(abs_id, False)
             for ov_elem in num.findall(f"{W_NS}lvlOverride"):
                 dl.overrides.append(self._build_override(ov_elem))
@@ -332,10 +394,12 @@ class ListBuilder:
         ov.ilvl = parse_int(ov_elem.get(f"{W_NS}ilvl", "0"))
         start_ov = ov_elem.find(f"{W_NS}startOverride")
         if start_ov is not None:
-            ov.is_start_at = True
-            ov.start_at_raw = parse_int(start_ov.get(f"{W_NS}val", "1"), 1)
+            ov.start_at = parse_int(start_ov.get(f"{W_NS}val", "1"), 1)
         inner_lvl = ov_elem.find(f"{W_NS}lvl")
         if inner_lvl is not None:
-            ov.is_formatting = True
             ov.list_level = self._build_level(inner_lvl)
+            # Propagate startOverride into the level when the level
+            # didn't define its own <w:start> (mirrors Aspose behavior).
+            if ov.start_at is not None and inner_lvl.find(f"{W_NS}start") is None:
+                ov.list_level.start_at = ov.start_at
         return ov

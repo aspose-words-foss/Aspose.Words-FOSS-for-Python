@@ -14,6 +14,7 @@ from aspose.words_foss.docx_reader.constants import (
     MC_NS,
     PIC_NS,
     R_NS,
+    V_NS,
     W_NS,
     WP_NS,
     WPG_NS,
@@ -44,14 +45,48 @@ class ShapeParserMixin:
 
     # These attributes are defined on DocumentReader but referenced here.
     _media: dict[str, bytes]
+    _rels: dict[str, str]
     _doc_image_rels: dict[str, str]
     _current_page_setup: Optional[ldm.PageSetup]
     _theme_colors: dict[str, str]
 
+    def _build_vml_shape(
+        self, pict_elem: ET.Element, image_rels: dict[str, str]
+    ) -> Optional[ldm.Shape]:
+        """Parse a legacy ``<w:pict>`` picture into a Shape.
+
+        A VML ``<v:imagedata>`` names its picture through a relationship that
+        may be external, in which case there are no bytes to carry and the
+        target itself is the image's source.
+        """
+        imagedata = pict_elem.find(f".//{V_NS}imagedata")
+        if imagedata is None:
+            return None
+        r_id = imagedata.get(f"{R_NS}id") or imagedata.get(f"{R_NS}embed") or ""
+        media_path = image_rels.get(r_id, "")
+        image_bytes = self._media.get(media_path) if media_path else None
+        source = media_path.rsplit("/", 1)[-1] if media_path else self._rels.get(r_id, "")
+        if not source and image_bytes is None:
+            return None
+
+        v_shape = pict_elem.find(f".//{V_NS}shape")
+        shape = ldm.Shape()
+        shape.has_image = True
+        shape.is_inline = True
+        shape.alternative_text = (v_shape.get("alt") or "") if v_shape is not None else ""
+        shape.image_data = ldm.ImageData(
+            source_full_name=source,
+            image_type=ldm.ImageData.from_mime(_ext_to_content_type(source)),
+            image_bytes=image_bytes or b"",
+        )
+        return shape
+
     def _build_drawing_shape(
         self, drawing_elem: ET.Element, image_rels: dict[str, str]
-    ) -> Optional[ldm.ShapeNode]:
-        """Parse a <w:drawing> element and return a ShapeNode if it contains an image."""
+    ) -> Optional[ldm.Shape]:
+        """Parse a <w:drawing> element and return a Shape if it contains an image."""
+        if drawing_elem.tag == f"{W_NS}pict":
+            return self._build_vml_shape(drawing_elem, image_rels)
         inline = drawing_elem.find(f"{WP_NS}inline")
         anchor = drawing_elem.find(f"{WP_NS}anchor")
         container = inline if inline is not None else anchor
@@ -82,7 +117,7 @@ class ShapeParserMixin:
             # captions, etc.).
             if not textbox_paragraphs:
                 return None
-            shape = ldm.ShapeNode()
+            shape = ldm.Shape()
             shape.has_image = False
             shape.is_inline = is_inline
             shape.width = width_pt
@@ -102,25 +137,21 @@ class ShapeParserMixin:
         if image_bytes is None:
             return None
 
-        # Prefer the original name from pic:cNvPr[@name] if available;
-        # always resolve content_type from the on-disk media path so the
-        # extension is reliable (cNvPr names are user-facing labels and
-        # rarely include an extension, e.g. ``"Picture 2"``).
         cNvPr = container.find(f".//{PIC_NS}cNvPr")
         if cNvPr is not None and cNvPr.get("name"):
             filename = cNvPr.get("name", "")
         else:
             filename = media_path.rsplit("/", 1)[-1]
-        content_type = _ext_to_content_type(media_path.rsplit("/", 1)[-1])
+        mime = _ext_to_content_type(media_path.rsplit("/", 1)[-1])
 
-        shape = ldm.ShapeNode()
+        shape = ldm.Shape()
         shape.has_image = True
         shape.is_inline = is_inline
         shape.width = width_pt
         shape.height = height_pt
         shape.image_data = ldm.ImageData(
-            source_filename=filename,
-            content_type=content_type,
+            source_full_name=filename,
+            image_type=ldm.ImageData.from_mime(mime),
             image_bytes=image_bytes,
         )
 
@@ -157,9 +188,8 @@ class ShapeParserMixin:
                 promote = True
         if not is_inline and anchor is not None:
             left_mm, top_mm = self._anchor_page_origin_mm(anchor)
-            shape.left = left_mm
-            shape.top = top_mm
-            # Parse wrap type from the anchor element.
+            shape._page_left_mm = left_mm
+            shape._page_top_mm = top_mm
             shape.wrap_type = self._parse_wrap_type(anchor)
             self._apply_anchor_metadata(shape, anchor)
             if promote:
@@ -188,7 +218,7 @@ class ShapeParserMixin:
     _V_ALIGN = {"top": 1, "center": 2, "bottom": 3, "inside": 4, "outside": 5}
 
     @classmethod
-    def _apply_anchor_metadata(cls, shape: "ldm.ShapeNode", anchor: ET.Element) -> None:
+    def _apply_anchor_metadata(cls, shape: "ldm.Shape", anchor: ET.Element) -> None:
         """Populate LDM-compatible anchor fields on *shape*.
 
         Captures the metadata Word stores on ``<wp:anchor>`` so a
@@ -204,7 +234,7 @@ class ShapeParserMixin:
             off = posH.find(f"{WP_NS}posOffset")
             if off is not None and off.text:
                 try:
-                    shape.horizontal_position = int(off.text) / _EMU_PER_PT
+                    shape.left = int(off.text) / _EMU_PER_PT
                 except ValueError:
                     pass
             align = posH.find(f"{WP_NS}align")
@@ -218,12 +248,12 @@ class ShapeParserMixin:
             off = posV.find(f"{WP_NS}posOffset")
             if off is not None and off.text:
                 try:
-                    shape.vertical_position = int(off.text) / _EMU_PER_PT
+                    shape.top = int(off.text) / _EMU_PER_PT
                 except ValueError:
                     pass
             align = posV.find(f"{WP_NS}align")
             if align is not None and align.text:
-                shape.vertical_anchor_alignment = cls._V_ALIGN.get(align.text.strip(), 0)
+                shape.vertical_alignment = cls._V_ALIGN.get(align.text.strip(), 0)
         # CT_OnOff-ish flags carry their default when the attribute is
         # absent.  ``behindDoc`` / ``locked`` default to ``0``;
         # ``allowOverlap`` / ``layoutInCell`` default to ``1``.
@@ -233,8 +263,8 @@ class ShapeParserMixin:
             return v not in ("0", "false")
         shape.behind_text = _flag("behindDoc", False)
         shape.allow_overlap = _flag("allowOverlap", True)
-        shape.layout_in_cell = _flag("layoutInCell", True)
-        shape.is_locked = _flag("locked", False)
+        shape.is_layout_in_cell = _flag("layoutInCell", True)
+        shape.anchor_locked = _flag("locked", False)
 
     @staticmethod
     def _parse_wrap_type(anchor: ET.Element) -> int:
@@ -262,8 +292,8 @@ class ShapeParserMixin:
 
     def _extract_positioned_shapes(
         self, drawing_elem: ET.Element, image_rels: dict[str, str]
-    ) -> list[ldm.ShapeNode]:
-        """Return positioned ShapeNodes for an anchored shape drawing.
+    ) -> list[ldm.Shape]:
+        """Return positioned Shapes for an anchored shape drawing.
 
         Word cover pages and other layouts express their visual elements
         (filled rectangles, captions, big title text) as ``<wp:anchor>``
@@ -288,7 +318,7 @@ class ShapeParserMixin:
 
         group = anchor.find(f".//{WPG_NS}wgp")
         if group is not None:
-            shapes: list[ldm.ShapeNode] = []
+            shapes: list[ldm.Shape] = []
             self._walk_group(
                 group,
                 parent_off_mm=(page_x_mm, page_y_mm),
@@ -309,8 +339,8 @@ class ShapeParserMixin:
             for s in shapes:
                 s.wrap_type = wrap
                 self._apply_anchor_metadata(s, anchor)
-                s.horizontal_position = 0.0
-                s.vertical_position = 0.0
+                s.left = 0.0
+                s.top = 0.0
             return shapes
 
         # Single wps:wsp directly under wp:anchor (no group wrapper).
@@ -420,11 +450,11 @@ class ShapeParserMixin:
         parent_scale: tuple[float, float],
         parent_ch_off_emu: tuple[int, int],
         image_rels: dict[str, str],
-        out: "list[ldm.ShapeNode]",
+        out: "list[ldm.Shape]",
     ) -> None:
         """Recursively flatten a ``<wpg:wgp>`` group into positioned shapes.
 
-        Every ``<wps:wsp>`` child contributes a ShapeNode with absolute
+        Every ``<wps:wsp>`` child contributes a Shape with absolute
         page coordinates (mm); nested ``<wpg:wgp>`` children are walked
         recursively with an updated transform.
         """
@@ -491,9 +521,9 @@ class ShapeParserMixin:
         parent_scale: tuple[float, float],
         parent_ch_off_emu: tuple[int, int],
         image_rels: dict[str, str],
-        out: "list[ldm.ShapeNode]",
+        out: "list[ldm.Shape]",
     ) -> None:
-        """Emit one positioned ShapeNode from a grouped ``<wps:wsp>``.
+        """Emit one positioned Shape from a grouped ``<wps:wsp>``.
 
         The shape's a:xfrm provides child-coordinate ``off`` / ``ext``;
         these are projected into absolute page-mm using the accumulated
@@ -541,17 +571,17 @@ class ShapeParserMixin:
         top: float,
         width: float,
         height: float,
-    ) -> "Optional[ldm.ShapeNode]":
-        """Build a positioned ShapeNode from a ``<wps:wsp>`` at known coords.
+    ) -> "Optional[ldm.Shape]":
+        """Build a positioned Shape from a ``<wps:wsp>`` at known coords.
 
-        Populates the standard ShapeNode fields:
+        Populates the standard Shape fields:
           * ``left`` / ``top`` / ``width`` / ``height`` — absolute page
             position and size in mm;
           * ``shading.background_pattern_color`` — solid fill, honouring both
             literal ``a:srgbClr`` and theme ``a:schemeClr`` references;
           * single ``borders`` entry — outline color + width from
             ``a:ln`` (same color resolver);
-          * ``vertical_alignment`` — 0/1/2 from the text-box anchor
+          * ``text_box_anchor`` — 0/1/2 from the text-box anchor
             attribute (``t`` / ``ctr`` / ``b`` in ``wps:bodyPr``);
           * ``text_box.paragraphs`` — harvested textbox content.
 
@@ -623,24 +653,22 @@ class ShapeParserMixin:
         if not fill_hex and not line_hex and not textbox_paragraphs:
             return None
 
-        shape = ldm.ShapeNode()
+        shape = ldm.Shape()
         shape.has_image = False
         shape.is_inline = False
-        shape.left = left
-        shape.top = top
+        shape._page_left_mm = left
+        shape._page_top_mm = top
         shape.width = width
         shape.height = height
         if fill_hex:
-            shape.shading = ldm.Shading(background_pattern_color=_hex_to_ldm_color(fill_hex))
+            shape.fill_color = _hex_to_ldm_color(fill_hex)
         if line_hex or line_width_pt > 0:
-            shape.borders = [
-                ldm.Border(
-                    line_style=1 if line_hex and line_width_pt > 0 else 0,
-                    line_width=line_width_pt,
-                    color=_hex_to_ldm_color(line_hex) if line_hex else COLOR_EMPTY,
-                )
-            ]
-        shape.vertical_alignment = vertical_alignment
+            shape.stroke = ldm.Border(
+                line_style=1 if line_hex and line_width_pt > 0 else 0,
+                line_width=line_width_pt,
+                color=_hex_to_ldm_color(line_hex) if line_hex else COLOR_EMPTY,
+            )
+        shape.text_box_anchor = vertical_alignment
         if textbox_paragraphs:
             shape.text_box = {
                 "paragraphs": textbox_paragraphs,
@@ -725,7 +753,7 @@ class ShapeParserMixin:
         stack: list[ET.Element] = list(run_elem)
         while stack:
             node = stack.pop()
-            if node.tag == f"{W_NS}drawing":
+            if node.tag in (f"{W_NS}drawing", f"{W_NS}pict"):
                 yield node
                 continue
             if node.tag == f"{MC_NS}AlternateContent":

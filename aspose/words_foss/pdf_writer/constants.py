@@ -122,6 +122,10 @@ HIGHLIGHT_HEIGHT_RATIO = 0.75
 
 CODE_BLOCK_BG_RGB = (245, 245, 245)
 QUOTE_TEXT_RGB = (100, 100, 100)
+HORIZONTAL_RULE_RGB = (170, 170, 170)
+BOTTOM_BORDER_SLOT = 0
+HORIZONTAL_RULE_MIN_WIDTH_PT = 1.5
+HORIZONTAL_RULE_CHARS = "-_* "
 HYPERLINK_TEXT_RGB = (0, 0, 238)
 
 # ---------------------------------------------------------------------------
@@ -182,8 +186,13 @@ COMPLIANCE_TO_VERSION: dict[str, str] = {
     PdfCompliance.PDF_A1B: "1.4",
     PdfCompliance.PDF_A2A: "1.7",
     PdfCompliance.PDF_A2U: "1.7",
+    PdfCompliance.PDF_A3A: "1.7",
+    PdfCompliance.PDF_A3U: "1.7",
     PdfCompliance.PDF_A4: "2.0",
+    PdfCompliance.PDF_A4F: "2.0",
+    PdfCompliance.PDF_A4_UA_2: "2.0",
     PdfCompliance.PDF_UA1: "1.7",
+    PdfCompliance.PDF_UA2: "2.0",
 }
 
 # fpdf2 alignment mapping (keyed by ParagraphAlignment values)

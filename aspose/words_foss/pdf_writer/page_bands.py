@@ -43,6 +43,14 @@ def _has_hf_content(doc: ldm.Document, *, header: bool) -> bool:
     return False
 
 
+def _hf_content_height(
+    writer: PDFWriterContext, children: list[Union[ldm.Paragraph, ldm.Table]]
+) -> float:
+    """Height in mm that *children* occupy once rendered in a band."""
+    usable_w = writer._page_width - writer._page_margin_left - writer._page_margin_right
+    return sum(writer._estimate_child_height(child, usable_w) for child in children)
+
+
 def _render_hf_children(
     pdf: FPDF,
     writer: PDFWriterContext,
@@ -114,6 +122,7 @@ def install_page_footer(
         return
 
     children = _collect_hf_children(doc, header=False)
+    content_h_mm = _hf_content_height(writer, children)
 
     def _footer_callback() -> None:
         if skip_first_page and pdf.page_no() == 1:
@@ -125,10 +134,11 @@ def install_page_footer(
         prev_bottom = pdf.b_margin
         try:
             pdf.set_auto_page_break(auto=False, margin=0)
-            band_top = max(
+            band_bottom = max(
                 writer._page_height - max(footer_y_mm, MIN_HEADER_FOOTER_Y_MM),
                 writer._page_height - writer._page_margin_bottom,
             )
+            band_top = max(band_bottom - content_h_mm, MIN_HEADER_FOOTER_Y_MM)
             pdf.set_xy(writer._page_margin_left, band_top)
             _render_hf_children(pdf, writer, children)
         finally:

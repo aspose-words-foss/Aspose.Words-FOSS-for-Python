@@ -1,6 +1,14 @@
 """Table-related enums."""
 
 
+class PreferredWidthType:
+    """Specifies the unit of measurement for the preferred width of a table or cell."""
+
+    AUTO = 0
+    PERCENT = 1
+    POINTS = 2
+
+
 class CellMerge:
     """Specifies how a cell in a table is merged with other cells.
     """

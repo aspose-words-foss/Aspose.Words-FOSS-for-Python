@@ -12,6 +12,7 @@ from typing import Optional
 from xml.etree import ElementTree as ET
 
 from aspose.words_foss import light_document_model as ldm
+from aspose.words_foss._visible_runs import HORIZONTAL_RULE_SHAPE_TYPE
 from aspose.words_foss.docx_reader.constants import (
     PAGE_FIELD_SENTINEL,
     R_NS,
@@ -29,6 +30,33 @@ from .cascading import (
 
 _HEADING_RE = re.compile(r"[Hh]eading\s*(\d+)")
 _PAGE_FIELD_RE = re.compile(r"\s*PAGE(\s|$)")
+
+_VML_RECT_TAG = "{urn:schemas-microsoft-com:vml}rect"
+_O_HR_ATTR = "{urn:schemas-microsoft-com:office:office}hr"
+_VML_LENGTH_RE = re.compile(r"(-?[\d.]+)([a-z]*)")
+_VML_UNIT_TO_PT = {"": 1.0, "pt": 1.0, "in": 72.0, "cm": 72.0 / 2.54, "mm": 72.0 / 25.4, "px": 0.75}
+
+
+def _vml_style_lengths(style: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for declaration in style.split(";"):
+        prop, _, raw = declaration.partition(":")
+        match = _VML_LENGTH_RE.match(raw.strip())
+        if match:
+            unit = _VML_UNIT_TO_PT.get(match.group(2), 1.0)
+            out[prop.strip()] = float(match.group(1)) * unit
+    return out
+
+
+def _build_horizontal_rule_shape(rect: ET.Element) -> ldm.Shape:
+    lengths = _vml_style_lengths(rect.get("style") or "")
+    return ldm.Shape(
+        shape_type=HORIZONTAL_RULE_SHAPE_TYPE,
+        width=lengths.get("width", 432.0),
+        height=lengths.get("height", 1.5),
+        is_inline=True,
+        fill_color="808080",
+    )
 
 
 class RunBuilder:
@@ -128,12 +156,7 @@ class ParagraphBuilder:
         self._apply_paragraph_meta(para.paragraph_format, para_style_id)
         self._apply_list_format(para, pPr, para_style_id)
 
-        text_parts: list[str] = []
         tracker = _FieldTracker()
-        # Children are appended to ``para._children`` directly in source
-        # order — runs, bookmark / field markers and inline shapes share
-        # the same ordered list, so re-emit no longer needs a per-extra
-        # ``run_index`` to know where each marker belongs.
         for child in self._ctx._resolve_paragraph_children(p_elem):
             tag = child.tag
             if tag == f"{W_NS}bookmarkStart":
@@ -141,11 +164,9 @@ class ParagraphBuilder:
             elif tag == f"{W_NS}bookmarkEnd":
                 self._handle_bookmark_end(child, para)
             elif tag == f"{W_NS}r":
-                self._handle_run(child, para, tracker, text_parts, para_style_id, image_rels)
+                self._handle_run(child, para, tracker, para_style_id, image_rels)
             elif tag == f"{W_NS}hyperlink":
-                self._handle_hyperlink(child, para, text_parts, para_style_id, tracker, image_rels)
-
-        para.text = "".join(text_parts)
+                self._handle_hyperlink(child, para, para_style_id, tracker, image_rels)
         return para
 
     @staticmethod
@@ -214,21 +235,16 @@ class ParagraphBuilder:
         child: ET.Element,
         para: ldm.Paragraph,
         tracker: _FieldTracker,
-        text_parts: list[str],
         para_style_id: str,
         image_rels: dict[str, str],
     ) -> None:
         fld_char = child.find(f"{W_NS}fldChar")
         if fld_char is not None:
-            self._handle_field_char(fld_char, child, para, tracker, text_parts, para_style_id)
+            self._handle_field_char(fld_char, child, para, tracker, para_style_id)
             return
         instr = child.find(f"{W_NS}instrText")
         if instr is not None:
             tracker.note_instr_text(instr.text or "")
-            # PAGE-sentinel fields synthesise the entire begin/code/separate/
-            # result/end chain on emit, so the literal "PAGE" instruction
-            # text is not materialised in the LDM — otherwise the sentinel
-            # emit would double-write the instruction.
             if tracker.page_pending:
                 return
         if tracker.suppress_cached:
@@ -238,7 +254,6 @@ class ParagraphBuilder:
         if not run.text:
             return
         para._children.append(run)
-        text_parts.append(run.text)
 
     def _handle_field_char(
         self,
@@ -246,7 +261,6 @@ class ParagraphBuilder:
         run_elem: ET.Element,
         para: ldm.Paragraph,
         tracker: _FieldTracker,
-        text_parts: list[str],
         para_style_id: str,
     ) -> None:
         ft = fld_char.get(f"{W_NS}fldCharType", "")
@@ -256,14 +270,10 @@ class ParagraphBuilder:
             return
         if ft == "separate":
             is_page = tracker.on_separate()
-            # Source order is begin → instr → separate → result → end, so the
-            # marker is appended *before* the synthesised sentinel run that
-            # stands in for the cached result.
             para._children.append(ldm.FieldSeparator())
             if is_page:
                 sentinel = self._build_page_sentinel(run_elem, para_style_id)
                 para._children.append(sentinel)
-                text_parts.append(sentinel.text)
             return
         if ft == "end":
             tracker.on_end()
@@ -291,12 +301,15 @@ class ParagraphBuilder:
             shape = self._ctx._build_drawing_shape(drawing, image_rels)
             if shape is not None:
                 para._children.append(shape)
+        for pict in run_elem.findall(f"{W_NS}pict"):
+            rect = pict.find(_VML_RECT_TAG)
+            if rect is not None and rect.get(_O_HR_ATTR) in ("t", "true", "1"):
+                para._children.append(_build_horizontal_rule_shape(rect))
 
     def _handle_hyperlink(
         self,
         child: ET.Element,
         para: ldm.Paragraph,
-        text_parts: list[str],
         para_style_id: str,
         tracker: _FieldTracker,
         image_rels: dict[str, str],
@@ -304,31 +317,14 @@ class ParagraphBuilder:
         url = self._resolve_hyperlink_url(child)
         head_runs, tail_runs = self._split_at_first_tab(child)
 
-        # Build the visible link run (head) — TOC-aware split so the
-        # title is clickable but a trailing tab + cached PAGEREF doesn't
-        # get welded into a single token.
         if head_runs:
             link_text = "".join(_collect_run_text(r) for r in head_runs)
             if link_text:
                 head_rPr = head_runs[0].find(f"{W_NS}rPr")
-                self._append_link_run(
-                    para,
-                    text_parts,
-                    link_text,
-                    url,
-                    head_rPr,
-                    para_style_id,
-                )
+                self._append_link_run(para, link_text, url, head_rPr, para_style_id)
 
-        # Tail runs may carry nested fields (e.g. a TOC entry's PAGEREF
-        # field with its own begin/instrText/separate/result/end chain).
-        # Route them through ``_handle_run`` so fldChars become
-        # child nodes and instrText becomes a code-section run — same
-        # as if the runs sat directly under the paragraph.  Because
-        # everything appends to ``children`` in source order, no
-        # positional stamping is needed here any more.
         for r_elem in tail_runs:
-            self._handle_run(r_elem, para, tracker, text_parts, para_style_id, image_rels)
+            self._handle_run(r_elem, para, tracker, para_style_id, image_rels)
 
     def _resolve_hyperlink_url(self, child: ET.Element) -> str:
         r_id = child.get(f"{R_NS}id", "")
@@ -351,7 +347,6 @@ class ParagraphBuilder:
     def _append_link_run(
         self,
         para: ldm.Paragraph,
-        text_parts: list[str],
         link_text: str,
         url: str,
         head_rPr: Optional[ET.Element],
@@ -361,7 +356,6 @@ class ParagraphBuilder:
         run.text = f"[{link_text}]({url})" if url else link_text
         run.font = self._font_resolver.resolve(head_rPr, para_style_id)
         para._children.append(run)
-        text_parts.append(run.text)
 
     @staticmethod
     def paragraph_ends_first_page(para: ldm.Paragraph) -> bool:

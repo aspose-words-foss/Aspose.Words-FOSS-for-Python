@@ -14,7 +14,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent))
+sys.path.append(str(_HERE.parent))  # append: must not shadow an installed wheel
 
 import aspose.words_foss as aw  # noqa: E402
 from docs_examples_base import DocsExamplesBase, MY_DIR, ARTIFACTS_DIR  # noqa: E402

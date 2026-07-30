@@ -9,6 +9,7 @@ from typing import Optional
 _PT_PER_INCH = 72.0
 _MM_PER_INCH = 25.4
 _PT_TO_MM = _MM_PER_INCH / _PT_PER_INCH  # 1 pt ≈ 0.3528 mm
+_EMU_PER_MM = 36000  # 1 mm = 36000 English Metric Units
 
 # -- Word default page dimensions (points) ------------------------------------
 _DEFAULT_PAGE_WIDTH_PT = 612.0  # US Letter width (8.5 in)
@@ -44,12 +45,13 @@ from aspose.words_foss.doc_reader.images import ShapeAnchor
 from aspose.words_foss.doc_reader.properties import CharProps, ParaProps
 from aspose.words_foss.doc_reader.table_builder import DocTableBuilderMixin
 from aspose.words_foss.doc_reader.text import clean_control_chars, evaluate_fields
+from aspose.words_foss.docx_reader.constants import PAGE_FIELD_SENTINEL
 from aspose.words_foss.model.style_identifiers import (
     IDENTIFIER_TO_STYLE_ID,
     resolve_style_identifier,
 )
 from aspose.words_foss.model.wrap_type import WrapType
-from aspose.words_foss.model.enums import NumberStyle, ParagraphAlignment, SectionStart, StyleType
+from aspose.words_foss.model.enums import ImageType, NumberStyle, ParagraphAlignment, SectionStart, StyleType
 from aspose.words_foss import light_document_model as ldm
 
 
@@ -75,8 +77,16 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             doc.sections = [sec]
 
         hdr, ftr = self._build_ldm_headers_footers()
-        doc.header_paragraphs = hdr
-        doc.footer_paragraphs = ftr
+        if doc.sections and (hdr or ftr):
+            sec = doc.sections[0]
+            if hdr:
+                sec.headers_footers.append(
+                    ldm.HeaderFooter(header_footer_type=0, children=list(hdr))
+                )
+            if ftr:
+                sec.headers_footers.append(
+                    ldm.HeaderFooter(header_footer_type=1, children=list(ftr))
+                )
         return doc
 
     def _split_into_sections(self, body_children: list) -> list[ldm.Section]:
@@ -200,14 +210,14 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
                 if sid >= 0:
                     pf.style_identifier = sid
                 s.paragraph_format = pf
-            # Resolve the effective rPr font for paragraph-style slots
-            # (stk=0/1) — character styles already expose their CHP.
-            if sd is not None and sd.stk in (0, 1):
+            if sd is not None and sd.stk in (0, 1, 2):
                 resolved_cp = self._resolve_char_props(istd)
                 font = self._build_ldm_font(resolved_cp)
                 if (font.name or font.size or font.bold or font.italic
                         or font.underline or font.color):
                     s.font = font
+                if sd.stk == 2:
+                    s.type = 2
             styles.append(s)
         return styles
 
@@ -234,7 +244,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             dl.list_id = lsid
             dl.is_multi_level = not list_def.is_simple and len(list_def.levels) > 1
             if list_def.levels:
-                dl.levels = [self._level_data_to_ldm(lvl) for lvl in list_def.levels]
+                dl.list_levels = [self._level_data_to_ldm(lvl) for lvl in list_def.levels]
             else:
                 ll = ldm.ListLevel()
                 ll.number_style = (
@@ -242,7 +252,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
                 )
                 if ll.number_style == NumberStyle.ARABIC:
                     ll.number_format = "%1."
-                dl.levels = [ll]
+                dl.list_levels = [ll]
             lists.append(dl)
         return lists
 
@@ -318,7 +328,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
 
     def _build_image_shape(
         self, anchor: ShapeAnchor, positioned: bool = False
-    ) -> Optional[ldm.ShapeNode]:
+    ) -> Optional[ldm.Shape]:
         pib = self._shape_blip_map.get(anchor.spid)
         if not pib or pib < 1 or pib > len(self._blips):
             return None
@@ -329,21 +339,33 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
         if not is_raster_blip(blip.blip_type, img_bytes):
             return None
 
-        content_type = "image/png"
+        img_type = ImageType.PNG
         if blip.blip_type in (ESCHER_BLIP_JPEG, ESCHER_BLIP_JPEG2):
-            content_type = "image/jpeg"
+            img_type = ImageType.JPEG
 
-        shape = ldm.ShapeNode()
+        shape = ldm.Shape()
         shape.has_image = True
         shape.width = anchor.width
         shape.height = anchor.height
-        shape.left = anchor.left
-        shape.top = anchor.top
-        shape.image_data = ldm.ImageData(content_type=content_type, image_bytes=img_bytes)
+        shape._page_left_mm = anchor.left * _PT_TO_MM
+        shape._page_top_mm = anchor.top * _PT_TO_MM
+        img_data = ldm.ImageData(image_type=img_type, image_bytes=img_bytes)
+        crop = self._shape_crop_map.get(anchor.spid)
+        if crop:
+            img_data.crop_left = crop.crop_left
+            img_data.crop_top = crop.crop_top
+            img_data.crop_right = crop.crop_right
+            img_data.crop_bottom = crop.crop_bottom
+        shape.image_data = img_data
         if positioned:
             shape._is_positioned = True
             shape.is_inline = False
             shape.wrap_type = WrapType.NONE
+            # Positioned shapes carry their dimensions in millimetres
+            # (the writer routes ``_is_positioned`` through ``mm_to_emu``);
+            # the SPA anchor gives points, so convert.
+            shape.width = anchor.width * _PT_TO_MM
+            shape.height = anchor.height * _PT_TO_MM
         else:
             shape.is_inline = False
             shape.wrap_type = self._SPA_WR_MAP.get(anchor.wr, WrapType.SQUARE)
@@ -351,7 +373,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
 
     # -- inline pictures (fSpec + PicLocation in Data stream) -----------------
 
-    def _parse_inline_picture(self, pic_location: int) -> Optional[ldm.ShapeNode]:
+    def _parse_inline_picture(self, pic_location: int) -> Optional[ldm.Shape]:
         data = self._data_stream_bytes
         if not data or pic_location < 0:
             return None
@@ -385,9 +407,9 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
         if not is_raster_blip(0, img_bytes):
             return None
 
-        content_type = "image/png"
+        img_type = ImageType.PNG
         if img_bytes[:2] == b"\xff\xd8":
-            content_type = "image/jpeg"
+            img_type = ImageType.JPEG
 
         mfp_mm = struct.unpack_from("<h", data, offset + 6)[0]
         dxa_goal = struct.unpack_from("<H", data, offset + 14)[0]
@@ -411,12 +433,12 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             width_pt = self._get_image_width_pt(img_bytes)
             height_pt = self._get_image_height_pt(img_bytes)
 
-        shape = ldm.ShapeNode()
+        shape = ldm.Shape()
         shape.has_image = True
         shape.is_inline = True
         shape.width = width_pt
         shape.height = height_pt
-        shape.image_data = ldm.ImageData(content_type=content_type, image_bytes=img_bytes)
+        shape.image_data = ldm.ImageData(image_type=img_type, image_bytes=img_bytes)
         return shape
 
     @staticmethod
@@ -554,7 +576,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             run = ldm.Run()
             run.text = "\f"
             pb._children = [run]
-            pb.text = "\f"
+
             return pb
 
         # Cover-page mode: only when the document has textbox content,
@@ -578,10 +600,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
                     if anchor:
                         shape = self._build_image_shape(anchor, positioned=first_page)
                         if shape:
-                            shape.left, shape.top = self._spa_to_page_mm(anchor)
-                            if first_page:
-                                shape.width = anchor.width * _PT_TO_MM
-                                shape.height = anchor.height * _PT_TO_MM
+                            shape._page_left_mm, shape._page_top_mm = self._spa_to_page_mm(anchor)
                             img_shapes.append(shape)
                     elif text[pos] == "\x01":
                         char_ranges = self._get_char_props_in_range(pos, pos + 1)
@@ -676,10 +695,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
                     shape = self._build_image_shape(anchor, positioned=first_page)
                     if shape:
                         # Convert SPA coords to absolute page mm.
-                        shape.left, shape.top = self._spa_to_page_mm(anchor)
-                        if first_page:
-                            shape.width = anchor.width * _PT_TO_MM
-                            shape.height = anchor.height * _PT_TO_MM
+                        shape._page_left_mm, shape._page_top_mm = self._spa_to_page_mm(anchor)
                         para._children.append(shape)
                 elif text[pos] == "\x01":
                     char_ranges = self._get_char_props_in_range(pos, pos + 1)
@@ -721,7 +737,6 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
         "no_space_between_paragraphs_of_same_style",
         "page_break_before",
         "baseline_alignment",
-        "conditional_style",
     )
 
     def _resolve_ldm_paragraph_format(self, props: ParaProps) -> ldm.ParagraphFormat:
@@ -735,6 +750,10 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
                 setattr(pf, field, getattr(props, field))
             else:
                 setattr(pf, field, getattr(style_pp, field))
+
+        cnf_src = props if "conditional_style" in props._set_fields else style_pp
+        if cnf_src.conditional_style:
+            pf.conditional_style = ldm.ConditionalStyleMask.from_val(cnf_src.conditional_style)
 
         if "line_spacing" in props._set_fields:
             pf.line_spacing = props.line_spacing
@@ -793,6 +812,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
                     line_style=b[0],
                     line_width=b[1],
                     color=b[2],
+                    distance_from_text=float(b[3]) if len(b) > 3 else 0.0,
                 ) if b is not None else ldm.Border()
                 for b in merged_borders
             ]
@@ -815,7 +835,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
         para._cp_start = cp  # type: ignore[attr-defined]
         props = self._get_para_props_at(cp)
         para.paragraph_format = self._resolve_ldm_paragraph_format(props)
-        para.text = ""
+
         return para
 
     def _build_ldm_paragraph(self, para_text: str, p_start: int, p_end: int) -> ldm.Paragraph:
@@ -853,7 +873,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             para._children.append(run)
             text_parts.append(run.text)
 
-        para.text = "".join(text_parts)
+
         return para
 
     def _build_ldm_font(self, cp: CharProps) -> ldm.Font:
@@ -872,14 +892,27 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
         font.outline = cp.outline
         font.shadow = cp.shadow
         font.kerning = cp.kerning
+        font.bold_bi = cp.bold_bi
+        font.italic_bi = cp.italic_bi
+        font.no_proofing = cp.no_proofing
 
         if cp.font_index >= 0 and cp.font_index in self._fonts:
             font.name = self._fonts[cp.font_index]
         elif self._default_font_index in self._fonts:
             font.name = self._fonts[self._default_font_index]
+        if cp.font_index_far_east >= 0 and cp.font_index_far_east in self._fonts:
+            fe_name = self._fonts[cp.font_index_far_east]
+            if fe_name != font.name:
+                font.name_far_east = fe_name
         font.size = cp.font_size if cp.font_size > 0 else _DEFAULT_FONT_SIZE_PT
         font.color = cp.color if cp.color else "Color [Empty]"
         font.highlight_color = cp.highlight_color if cp.highlight_color else "Color [Empty]"
+        if cp.locale_id:
+            font.locale_id = cp.locale_id
+        if cp.locale_id_bi:
+            font.locale_id_bi = cp.locale_id_bi
+        if cp.locale_id_far_east:
+            font.locale_id_far_east = cp.locale_id_far_east
 
         if cp.style_index >= 0 and cp.style_index in self._styles:
             font.style_name = self._styles[cp.style_index]
@@ -911,7 +944,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             run.text = clean_text
             run.font = self._build_ldm_font(style_cp)
             para._children.append(run)
-        para.text = clean_text
+
         return para
 
     # -- textbox injection (cover page) ---------------------------------------
@@ -957,6 +990,13 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
         attach_para = first_para
         if attach_para is None:
             return
+
+        if pb_para is not None and first_para is not pb_para:
+            moved = [c for c in pb_para._children
+                     if isinstance(c, ldm.Shape) and c._is_positioned]
+            if moved:
+                pb_para._children = [c for c in pb_para._children if c not in moved]
+                attach_para._children.extend(moved)
 
         # Build a unified shape→(cp_start, cp_end) mapping from
         # PlcftxbxTxt if available, otherwise from FOpt txid.
@@ -1031,19 +1071,30 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             if not tb_paras:
                 continue
 
-            shape = ldm.ShapeNode()
+            shape = ldm.Shape()
             shape.has_image = False
             shape.is_inline = False
             shape._is_positioned = True
-            shape.wrap_type = WrapType.SQUARE
-            shape.left = left_mm
-            shape.top = top_mm
+            # Cover-page textboxes are absolutely positioned and must not
+            # reflow the body text they sit over (Word renders them
+            # ``position:absolute``).  ``SQUARE`` wrap would push the
+            # cover heading paragraph down the page; use ``NONE``.
+            shape.wrap_type = WrapType.NONE
+            shape._page_left_mm = left_mm
+            shape._page_top_mm = top_mm
             shape.width = w_mm
             shape.height = h_mm
-            shape.text_box = {"paragraphs": tb_paras}
+            text_box: dict = {"paragraphs": tb_paras}
+            # Carry the textbox's internal text margins (Escher FOpt
+            # dxTextLeft/Top/Right/Bottom) so the writer reproduces the
+            # cover banner's indent instead of falling back to Word's
+            # default 0.1" inset.
+            insets_emu = self._shape_textbox_insets.get(shape_id)
+            if insets_emu is not None:
+                text_box["insets_mm"] = tuple(v / _EMU_PER_MM for v in insets_emu)
+            shape.text_box = text_box
 
-            target = pb_para or attach_para
-            target._children.append(shape)
+            attach_para._children.append(shape)
 
     def _build_stories_from_txid(
         self, txbx_start: int, txbx_end: int
@@ -1117,7 +1168,7 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             run.text = cleaned
             run.font = self._build_ldm_font(style_cp)
             para._children = [run]
-            para.text = cleaned
+
             paras.append(para)
             line_pos += len(line) + 1
         return paras
@@ -1165,13 +1216,13 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             parent_w_mm = parent_spa.width * _PT_TO_MM
             parent_h_mm = parent_spa.height * _PT_TO_MM
 
-            bar = ldm.ShapeNode()
+            bar = ldm.Shape()
             bar.is_inline = False
             bar._is_positioned = True
             bar.wrap_type = WrapType.NONE
-            bar.shading = ldm.Shading(background_pattern_color=color_str)
-            bar.left = abs_left + (child_anchor.left - group.coord_left) / grp_w * parent_w_mm
-            bar.top = abs_top + (child_anchor.top - group.coord_top) / grp_h * parent_h_mm
+            bar.fill_color = color_str
+            bar._page_left_mm = abs_left + (child_anchor.left - group.coord_left) / grp_w * parent_w_mm
+            bar._page_top_mm = abs_top + (child_anchor.top - group.coord_top) / grp_h * parent_h_mm
             bar.width = (child_anchor.right - child_anchor.left) / grp_w * parent_w_mm
             bar.height = (child_anchor.bottom - child_anchor.top) / grp_h * parent_h_mm
 
@@ -1184,7 +1235,11 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
                     tb_paras = self._build_textbox_paragraphs(abs_s, abs_e)
                     if tb_paras:
                         bar.text_box = {"paragraphs": tb_paras}
-                        bar.vertical_alignment = 2  # bottom-anchored
+                        # Cover-page banner text sits at the top of its fill
+                        # rectangle (the band extends solid below the text),
+                        # matching Word's default top text-anchor — not the
+                        # page-bottom.
+                        bar.text_box_anchor = 0  # top-anchored
                 handled.add(spid)
 
             attach_para._children.append(bar)
@@ -1192,6 +1247,105 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
         return handled
 
     # -- headers & footers ----------------------------------------------------
+
+    def _build_hf_line_nodes(self, line_start: int, line_end: int, style_cp: CharProps):
+        """Build run / field nodes for one header or footer text line.
+
+        Splits the line into runs along CHPX (character-property)
+        boundaries so per-character formatting — e.g. a superscript ``©``
+        followed by normal body text — is preserved instead of the whole
+        line inheriting the first character's properties.  Word field
+        codes are handled inline: ``PAGE`` fields become a
+        FieldStart / FieldSeparator / Run(sentinel) / FieldEnd chain;
+        other fields (HYPERLINK, etc.) collapse to their evaluated text.
+        """
+        text = self._text
+        char_ranges = self._get_char_props_in_range(line_start, line_end)
+
+        def font_at(pos: int) -> ldm.Font:
+            for cs, ce, cp in char_ranges:
+                if cs <= pos < ce:
+                    merged = self._merge_char_props(style_cp, cp, cp._set_fields)
+                    return self._build_ldm_font(merged)
+            return self._build_ldm_font(style_cp)
+
+        nodes: list = []
+        buf: list[str] = []
+        buf_font: Optional[ldm.Font] = None
+
+        def flush() -> None:
+            nonlocal buf, buf_font
+            if buf:
+                run = ldm.Run()
+                run.text = "".join(buf)
+                run.font = buf_font
+                nodes.append(run)
+            buf = []
+            buf_font = None
+
+        pos = line_start
+        while pos < line_end:
+            ch = text[pos]
+            if ch == "\x13":
+                flush()
+                depth = 1
+                sep = end = -1
+                scan = pos + 1
+                while scan < line_end and depth > 0:
+                    c = text[scan]
+                    if c == "\x13":
+                        depth += 1
+                    elif c == "\x14":
+                        if depth == 1 and sep < 0:
+                            sep = scan
+                    elif c == "\x15":
+                        depth -= 1
+                        if depth == 0:
+                            end = scan
+                    scan += 1
+                if sep < 0:
+                    pos += 1
+                    continue
+                if end < 0:
+                    end = line_end
+                field_code = text[pos + 1:sep].replace("\x01", "").strip()
+                field_font = font_at(sep + 1 if sep + 1 < end else pos + 1)
+                code_words = field_code.split()
+                if code_words and code_words[0] == "PAGE":
+                    sentinel = ldm.Run()
+                    sentinel.text = PAGE_FIELD_SENTINEL
+                    sentinel.font = field_font
+                    nodes.extend([
+                        ldm.FieldStart(),
+                        ldm.FieldSeparator(),
+                        sentinel,
+                        ldm.FieldEnd(),
+                    ])
+                else:
+                    cleaned = clean_control_chars(evaluate_fields(text[pos:end + 1]))
+                    if cleaned:
+                        run = ldm.Run()
+                        run.text = cleaned
+                        run.font = field_font
+                        nodes.append(run)
+                pos = end + 1
+                continue
+
+            if clean_control_chars(ch) == "" or ch == "\x0c":
+                # Drop field/shape control characters.
+                pos += 1
+                continue
+
+            f = font_at(pos)
+            if buf and f != buf_font:
+                flush()
+            if not buf:
+                buf_font = f
+            buf.append(ch)
+            pos += 1
+
+        flush()
+        return nodes
 
     def _build_ldm_headers_footers(
         self,
@@ -1246,32 +1400,23 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
         ):
             if region_start < 0:
                 continue
-            region_text = text[region_start:region_end]
-            if "\x13" in region_text:
-                region_text = evaluate_fields(region_text)
             raw_lines = text[region_start:region_end].split("\r")
-            eval_lines = region_text.split("\r")
             line_pos = region_start
-            for raw_line, eval_line in zip(raw_lines, eval_lines):
-                cleaned = clean_control_chars(eval_line).strip()
-                if not cleaned:
-                    line_pos += len(raw_line) + 1
+            for raw_line in raw_lines:
+                line_start = line_pos
+                line_end = line_pos + len(raw_line)
+                line_pos = line_end + 1
+                preview = evaluate_fields(raw_line) if "\x13" in raw_line else raw_line
+                if not clean_control_chars(preview).strip():
                     continue
                 para = ldm.Paragraph()
-                props = self._get_para_props_at(line_pos)
+                props = self._get_para_props_at(line_start)
                 para.paragraph_format = self._resolve_ldm_paragraph_format(props)
                 style_cp = self._resolve_char_props(props.istd)
-                chpx = self._get_char_props_in_range(line_pos, line_pos + len(raw_line))
-                if chpx:
-                    first_cp = chpx[0][2]
-                    style_cp = self._merge_char_props(style_cp, first_cp, first_cp._set_fields)
-                run = ldm.Run()
-                run.text = cleaned
-                run.font = self._build_ldm_font(style_cp)
-                para._children = [run]
-                para.text = cleaned
-                target.append(para)
-                line_pos += len(raw_line) + 1
+                children = self._build_hf_line_nodes(line_start, line_end, style_cp)
+                if children:
+                    para._children = children
+                    target.append(para)
 
         if headers and self._hdr_shape_anchors:
             # SPA coords are relative to the text column / header band
@@ -1283,14 +1428,12 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
             for anchor in self._hdr_shape_anchors:
                 shape = self._build_image_shape(anchor, positioned=True)
                 if shape:
-                    max_h = 14.0
-                    if anchor.height > max_h and anchor.width > 0:
-                        scale = max_h / anchor.height
-                        shape.width = anchor.width * scale
-                        shape.height = max_h
-                    # Convert to absolute page coords (mm)
-                    shape.left = (margin_left_pt + anchor.left) * _PT_TO_MM
-                    shape.top = (hdr_dist_pt + anchor.top) * _PT_TO_MM
+                    shape._page_left_mm = (margin_left_pt + anchor.left) * _PT_TO_MM
+                    shape._page_top_mm = (hdr_dist_pt + anchor.top) * _PT_TO_MM
+                    # Anchor vertically to the page edge so the logo lands in
+                    # the header band (header_distance from the page top), not
+                    # the body top margin.
+                    shape.relative_vertical_position = 1  # page
                     headers[0]._children.append(shape)
                     continue
 
@@ -1300,22 +1443,20 @@ class DocFileReader(DocTableBuilderMixin, DocFileReaderCore):
                 if line_props and line_props.line_color_rgb:
                     r, g, b = line_props.line_color_rgb
                     color_str = f"Color [A=255, R={r}, G={g}, B={b}]"
-                    bar = ldm.ShapeNode()
+                    bar = ldm.Shape()
                     bar.has_image = False
                     bar.is_inline = False
                     bar.width = anchor.width * _PT_TO_MM  # pt -> mm
                     bar.height = anchor.height * _PT_TO_MM
-                    bar.left = (margin_left_pt + anchor.left) * _PT_TO_MM
-                    bar.top = (hdr_dist_pt + anchor.top) * _PT_TO_MM
+                    bar._page_left_mm = (margin_left_pt + anchor.left) * _PT_TO_MM
+                    bar._page_top_mm = (hdr_dist_pt + anchor.top) * _PT_TO_MM
                     bar.wrap_type = WrapType.NONE
                     bar._is_positioned = True
-                    bar.borders = [
-                        ldm.Border(
-                            line_style=1,
-                            line_width=line_props.line_width_pt,
-                            color=color_str,
-                        )
-                    ]
+                    bar.stroke = ldm.Border(
+                        line_style=1,
+                        line_width=line_props.line_width_pt,
+                        color=color_str,
+                    )
                     # Place in a new empty paragraph, matching the DOCX
                     # layout where the bar lives in its own paragraph.
                     bar_para = ldm.Paragraph()

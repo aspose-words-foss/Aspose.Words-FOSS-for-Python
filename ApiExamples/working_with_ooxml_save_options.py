@@ -18,7 +18,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent))
+sys.path.append(str(_HERE.parent))  # append: must not shadow an installed wheel
 
 import aspose.words_foss as aw  # noqa: E402
 from docs_examples_base import ARTIFACTS_DIR, DocsExamplesBase  # noqa: E402
@@ -41,11 +41,13 @@ class WorkingWithOoxmlSaveOptions(DocsExamplesBase):
         output = Path(ARTIFACTS_DIR) / "OoxmlSaveOptions.pretty_format.docx"
         with zipfile.ZipFile(output) as zf:
             doc_xml = zf.read("word/document.xml").decode("utf-8")
-        assert "\n  " in doc_xml, "XML should be indented"
+        assert "\r\n\t" in doc_xml, "XML should be indented"
+        assert len(doc_xml.splitlines()) > 1, "Pretty mode: XML should span many lines"
 
     def test_pretty_format_off(self):
         # ExStart:PrettyFormatOff
         save_options = aw.saving.OoxmlSaveOptions()
+        save_options.pretty_format = False
 
         self.convert(
             "test_full_article.docx",
@@ -57,11 +59,27 @@ class WorkingWithOoxmlSaveOptions(DocsExamplesBase):
         output = Path(ARTIFACTS_DIR) / "OoxmlSaveOptions.compact.docx"
         with zipfile.ZipFile(output) as zf:
             doc_xml = zf.read("word/document.xml").decode("utf-8")
-        body_lines = [
-            ln for ln in doc_xml.splitlines()
-            if ln.strip() and not ln.startswith("<?xml")
-        ]
-        assert len(body_lines) == 1, "Compact mode: body XML should be a single line"
+        assert len(doc_xml.splitlines()) == 1, "Compact mode: whole part on one line"
+
+    def test_pretty_format_round_trip(self):
+        """Pretty-formatted DOCX should produce the same text after reload."""
+        # ExStart:PrettyFormatRoundTrip
+        save_options = aw.saving.OoxmlSaveOptions()
+        save_options.pretty_format = True
+
+        self.convert(
+            "test_full_article.docx",
+            "OoxmlSaveOptions.pretty_roundtrip.docx",
+            save_options=save_options,
+        )
+
+        original = aw.Document(
+            str(Path(ARTIFACTS_DIR) / ".." / ".." / "tests" / "data" / "input" / "test_full_article.docx")
+        )
+        reloaded = aw.Document(str(Path(ARTIFACTS_DIR) / "OoxmlSaveOptions.pretty_roundtrip.docx"))
+        # ExEnd:PrettyFormatRoundTrip
+
+        assert original.get_text().strip() == reloaded.get_text().strip()
 
     def test_set_compression_level(self):
         # ExStart:SetCompressionLevel
@@ -83,6 +101,8 @@ if __name__ == "__main__":
     examples.test_set_pretty_format()
     print("  set_pretty_format: Done.")
     examples.test_pretty_format_off()
+    print("  pretty_format_off: Done.")
+    examples.test_pretty_format_round_trip()
     print("  pretty_format_round_trip: Done.")
     examples.test_set_compression_level()
     print("  set_compression_level: Done.")

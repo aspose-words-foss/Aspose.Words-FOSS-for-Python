@@ -36,7 +36,9 @@ PARA_ONOFF_FLAGS: tuple[tuple[str, str, bool], ...] = (
 #: to ``False`` (Word's behaviour when the element is absent).
 RUN_ONOFF_FLAGS: tuple[tuple[str, str, bool], ...] = (
     ("b", "bold", False),
+    ("bCs", "bold_bi", False),
     ("i", "italic", False),
+    ("iCs", "italic_bi", False),
     ("strike", "strike_through", False),
     ("caps", "all_caps", False),
     ("smallCaps", "small_caps", False),
@@ -45,6 +47,7 @@ RUN_ONOFF_FLAGS: tuple[tuple[str, str, bool], ...] = (
     ("imprint", "engrave", False),
     ("outline", "outline", False),
     ("shadow", "shadow", False),
+    ("noProof", "no_proofing", False),
 )
 
 # ---------------------------------------------------------------------------
@@ -123,6 +126,7 @@ FRAME_WRAP_MAP: dict[str, int] = {
 }
 
 #: ``<w:framePr/>`` int-enum attributes → ``(FrameFormat field, OOXML→int map)``.
+#: ``w:anchorLock`` (boolean) is handled separately by the caller.
 FRAME_ENUM_ATTRS: tuple[tuple[str, str, dict[str, int]], ...] = (
     ("hRule", "height_rule", FRAME_HEIGHT_RULE_MAP),
     ("xAlign", "horizontal_alignment", FRAME_HALIGN_MAP),
@@ -174,14 +178,17 @@ LIST_TRAILING_CHARACTER_MAP: dict[str, int] = {
 #: colour fields ignore an empty-sentinel override so a derived style
 #: doesn't wipe an explicit base colour (handled in the merge code).
 MERGE_FONT_FIELDS: tuple[str, ...] = (
-    "name", "size", "bold", "italic", "underline", "color",
+    "name", "size", "bold", "bold_bi", "italic", "italic_bi",
+    "underline", "color",
     "strike_through", "superscript", "subscript", "highlight_color",
-    "all_caps", "small_caps", "hidden",
+    "all_caps", "small_caps", "hidden", "no_proofing",
     "style_name", "style_identifier",
     "shading",
     "emboss", "engrave", "outline", "shadow",
     "text_effect", "emphasis_mark",
     "kerning",
+    "name_bi", "name_far_east", "name_ascii",
+    "locale_id", "locale_id_bi", "locale_id_far_east",
 )
 
 #: Fields propagated by ``LdmBuilderMixin._merge_pf``.  ``tab_stops``
@@ -194,7 +201,8 @@ MERGE_PF_FIELDS: tuple[str, ...] = (
     "keep_with_next", "page_break_before",
     "no_space_between_paragraphs_of_same_style",
     "outline_level", "is_heading", "is_list_item",
-    "paragraph_mark_font",
+    "shading", "borders",
+    "paragraph_break_font",
     "keep_together", "widow_control",
     "suppress_auto_hyphens", "suppress_line_numbers",
     "snap_to_grid",
@@ -202,5 +210,5 @@ MERGE_PF_FIELDS: tuple[str, ...] = (
     "add_space_between_far_east_and_digit",
     "auto_adjust_right_indent",
     "baseline_alignment", "conditional_style",
-    "frame", "lines_to_drop", "drop_cap_position",
+    "frame_format", "lines_to_drop", "drop_cap_position",
 )

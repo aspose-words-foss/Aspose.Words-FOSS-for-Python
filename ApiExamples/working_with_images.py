@@ -14,7 +14,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent))
+sys.path.append(str(_HERE.parent))  # append: must not shadow an installed wheel
 
 from docs_examples_base import DocsExamplesBase, ARTIFACTS_DIR  # noqa: E402
 
@@ -28,6 +28,7 @@ IMAGE_FILES = [
     "image_in_header.docx",
     "image_in_footer.docx",
     "wide_image.docx",
+    "no_images.docx",
 ]
 
 

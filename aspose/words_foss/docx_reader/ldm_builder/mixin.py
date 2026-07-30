@@ -55,6 +55,9 @@ class LdmBuilderMixin:
             doc.lists = self._lists_builder.build_all()
         doc.sections = self._sections_builder.build_all()
 
+        if self._doc_default_rPr is not None:
+            doc.doc_defaults_font = self._fonts_builder.build(self._doc_default_rPr)
+
         self._populate_headers_footers(doc)
         return doc
 
@@ -161,9 +164,6 @@ class LdmBuilderMixin:
         ftr_paras, ftr_children = self._build_part_children(
             self._footer_data, anchor_mode="footer"
         )
-        doc.header_paragraphs = hdr_paras
-        doc.footer_paragraphs = ftr_paras
-
         for sec in doc.sections:
             if hdr_children:
                 sec.headers_footers.append(

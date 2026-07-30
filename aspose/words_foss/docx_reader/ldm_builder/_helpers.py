@@ -149,11 +149,26 @@ def build_borders(bdr_elem: ET.Element) -> list[ldm.Border]:
 
 def _build_one_border(side_elem: ET.Element) -> ldm.Border:
     b = ldm.Border()
-    b.line_style = _BORDER_STYLE_MAP.get(side_elem.get(f"{W_NS}val", "none"), 0)
+    val = side_elem.get(f"{W_NS}val", "none")
+    b.line_style = _BORDER_STYLE_MAP.get(val, 0)
+    # An explicit ``none``/``nil`` border suppresses an inherited border;
+    # preserve that intent so the writer can re-emit it (otherwise a table
+    # style's inside borders reappear on round-trip).
+    if val in ("none", "nil"):
+        b.is_visible = False
     sz = side_elem.get(f"{W_NS}sz", "")
     if sz:
         b.line_width = int(sz) / _BORDER_SIZE_DIVISOR
     b.color = _hex_to_ldm_color(side_elem.get(f"{W_NS}color", ""))
+    space = side_elem.get(f"{W_NS}space", "")
+    if space:
+        try:
+            b.distance_from_text = float(space)
+        except ValueError:
+            pass
+    shadow_val = side_elem.get(f"{W_NS}shadow", "")
+    if shadow_val and shadow_val not in ("0", "false"):
+        b.shadow = True
     return b
 
 
@@ -188,5 +203,6 @@ def build_frame(frame_pr: ET.Element) -> ldm.FrameFormat:
         if mapped is not None:
             setattr(ff, target, mapped)
     anchor_lock = frame_pr.get(f"{W_NS}anchorLock")
-    ff.lock_anchor = anchor_lock not in (None, "0", "false")
+    if anchor_lock not in (None, "0", "false"):
+        ff.anchor_locked = True
     return ff

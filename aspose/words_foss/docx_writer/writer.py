@@ -16,6 +16,12 @@ from typing import Optional, Union
 from dataclasses import dataclass
 
 from aspose.words_foss import light_document_model as ldm
+from aspose.words_foss.saving import (
+    CompressionLevel,
+    OoxmlCompliance,
+    Zip64Mode,
+    coerce_enum,
+)
 from aspose.words_foss.docx_writer.bookmarks import BookmarkState
 from aspose.words_foss.docx_writer.document_part import _build_style_pf_map, render_document_xml
 from aspose.words_foss.docx_writer.drawing import ImageEntry, ImageRenderState
@@ -50,7 +56,7 @@ class DocxWriterLossyWarning(UserWarning):
 # Headers/footers, inline shapes/images, bookmarks, and custom-style
 # ``<w:pPr>`` are now preserved on round-trip — see ``drawing.py``,
 # ``bookmarks.py``, ``headers_footers.py`` and ``styles_part._custom_style``.
-# Text-box-only shapes (``ShapeNode`` without ``image_data``) and
+# Text-box-only shapes (``Shape`` without ``image_data``) and
 # ``FieldStart`` markers in ``inline_extras`` are still dropped silently
 # — they don't appear in the test fixtures and adding emit paths for
 # them is a separate scope.
@@ -68,16 +74,16 @@ def _warn_about_unsupported_constructs(doc: ldm.Document) -> None:
 
 
 _COMPRESSION_MAP: dict[int, tuple[int, int]] = {
-    0: (zipfile.ZIP_DEFLATED, 6),
-    1: (zipfile.ZIP_DEFLATED, 9),
-    2: (zipfile.ZIP_DEFLATED, 3),
-    3: (zipfile.ZIP_DEFLATED, 1),
+    CompressionLevel.NORMAL: (zipfile.ZIP_DEFLATED, 6),
+    CompressionLevel.MAXIMUM: (zipfile.ZIP_DEFLATED, 9),
+    CompressionLevel.FAST: (zipfile.ZIP_DEFLATED, 3),
+    CompressionLevel.SUPER_FAST: (zipfile.ZIP_DEFLATED, 1),
 }
 
-_ZIP64_MAP: dict[str, bool] = {
-    "never": False,
-    "if_necessary": True,
-    "always": True,
+_ZIP64_MAP: dict[int, bool] = {
+    Zip64Mode.NEVER: False,
+    Zip64Mode.IF_NECESSARY: True,
+    Zip64Mode.ALWAYS: True,
 }
 
 
@@ -129,7 +135,7 @@ class LdmDocxWriter:
         worse than failing fast.
         """
         compliance = getattr(self.options, "compliance", None)
-        if compliance and str(compliance).lower() == "iso29500_2008_strict":
+        if compliance == OoxmlCompliance.ISO29500_2008_STRICT:
             raise NotImplementedError(
                 "OoxmlCompliance.ISO29500_2008_STRICT is not supported by "
                 "the FOSS writer; use ECMA376_2006 or "
@@ -138,12 +144,14 @@ class LdmDocxWriter:
 
     def _compression(self) -> tuple[int, int]:
         """Return ``(compress_type, compresslevel)`` for :mod:`zipfile`."""
-        level = getattr(self.options, "compression_level", 0)
-        return _COMPRESSION_MAP.get(level, _COMPRESSION_MAP[0])
+        level = coerce_enum(
+            CompressionLevel, getattr(self.options, "compression_level", CompressionLevel.NORMAL)
+        )
+        return _COMPRESSION_MAP.get(level, _COMPRESSION_MAP[CompressionLevel.NORMAL])
 
     def _allow_zip64(self) -> bool:
-        mode = getattr(self.options, "zip_64_mode", "never") or "never"
-        return _ZIP64_MAP.get(str(mode).lower(), False)
+        mode = getattr(self.options, "zip_64_mode", Zip64Mode.NEVER)
+        return _ZIP64_MAP.get(coerce_enum(Zip64Mode, mode), False)
 
     def _pretty_format(self) -> bool:
         return bool(getattr(self.options, "pretty_format", False))

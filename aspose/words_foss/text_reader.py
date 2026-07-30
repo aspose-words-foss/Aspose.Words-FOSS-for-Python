@@ -3,11 +3,15 @@ Plain-text and Markdown file readers.
 
 Provides TextFileReader (for .txt) and MarkdownFileReader (for .md) that
 implement the same public interface as DocumentReader and DocFileReader,
-producing a light_document_model.Document for the conversion pipeline.
+producing a light_document_model.Document.
 
 Both readers parse content line-by-line into Paragraph nodes, which then
 flow through the standard Converter pipeline — identical to how DOCX
-and DOC formats are handled via the Document class.
+and DOC formats are handled via the Document class. Real Markdown
+structure (headings, lists, quotes, tables, inline emphasis/links) is
+built by markdown_reader.MarkdownReader instead, which reader_factory
+wires up for the ".md" suffix; MarkdownFileReader here stays a plain
+per-block literal-text reader, reused by MarkdownReader only for loading.
 """
 
 from pathlib import Path
@@ -34,18 +38,19 @@ class TextFileReader:
 
     def __init__(self) -> None:
         self._text: Optional[str] = None
+        self.encoding: str = "utf-8"
 
     def load_file(self, filepath: Union[str, Path]) -> None:
         """Load a .txt file from *filepath*."""
-        self._text = Path(filepath).read_text(encoding="utf-8")
+        self._text = Path(filepath).read_text(encoding=self.encoding)
 
     def load_stream(self, stream: BinaryIO) -> None:
         """Load from a binary stream."""
-        self._text = stream.read().decode("utf-8")
+        self._text = stream.read().decode(self.encoding)
 
     def load_bytes(self, data: bytes) -> None:
         """Load from raw bytes."""
-        self._text = data.decode("utf-8")
+        self._text = data.decode(self.encoding)
 
     def _iterate_body_elements(
         self,
@@ -75,7 +80,6 @@ class TextFileReader:
         if self._text is not None:
             for line in self._text.splitlines():
                 para = ldm.Paragraph()
-                para.text = line
                 run = ldm.Run()
                 run.text = line
                 para._children = [run]
@@ -93,23 +97,35 @@ class MarkdownFileReader:
 
     Follows the same reader interface as DocumentReader and
     DocFileReader so that .md files flow through the standard
-    Converter pipeline via the Document class.
+    Converter pipeline via the Document class. Loading is reused by
+    MarkdownReader (see markdown_reader.py), which builds real Markdown
+    structure from the loaded text instead of this class's literal
+    to_light_document().
     """
 
     def __init__(self) -> None:
         self._text: Optional[str] = None
+        self.encoding: str = "utf-8"
 
     def load_file(self, filepath: Union[str, Path]) -> None:
         """Load a .md file from *filepath*."""
-        self._text = Path(filepath).read_text(encoding="utf-8")
+        self.load_bytes(Path(filepath).read_bytes())
 
     def load_stream(self, stream: BinaryIO) -> None:
         """Load from a binary stream."""
-        self._text = stream.read().decode("utf-8")
+        self.load_bytes(stream.read())
 
     def load_bytes(self, data: bytes) -> None:
         """Load from raw bytes."""
-        self._text = data.decode("utf-8")
+        text = data.decode(self.encoding)
+        if text.startswith("\ufeff"):
+            text = text[1:]
+        self._text = text
+
+    @property
+    def text(self) -> Optional[str]:
+        """Raw loaded Markdown source, or ``None`` before ``load_*`` is called."""
+        return self._text
 
     def _iterate_body_elements(
         self,
@@ -150,7 +166,6 @@ class MarkdownFileReader:
                     if block:
                         para = ldm.Paragraph()
                         block_text = "\n".join(block)
-                        para.text = block_text
                         run = ldm.Run()
                         run.text = block_text
                         para._children = [run]
@@ -161,7 +176,6 @@ class MarkdownFileReader:
             if block:
                 para = ldm.Paragraph()
                 block_text = "\n".join(block)
-                para.text = block_text
                 run = ldm.Run()
                 run.text = block_text
                 para._children = [run]

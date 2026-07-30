@@ -24,9 +24,20 @@ from aspose.words_foss.model.style_identifiers import IDENTIFIER_TO_STYLE_ID
 # left as literal text.  This isn't a regression — the readers don't
 # produce those either — but a future fix could switch to a manual
 # bracket-matching scan if real fixtures show up.
-_MD_LINK_RE = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)$")
+_MD_LINK_RE = re.compile(r"^\[([^\]]+)\]\(([^)]+)\)(\t.+)?$")
 _HEX_COLOR_RE = re.compile(r"Color \[A=(?P<a>\d+), R=(?P<r>\d+), G=(?P<g>\d+), B=(?P<b>\d+)\]")
 _RAW_HEX_RE = re.compile(r"^[0-9A-Fa-f]{6}$")
+
+_LCID_TO_LANG_TAG: dict[int, str] = {
+    1033: "en-US", 1049: "ru-RU", 2052: "zh-CN", 1028: "zh-TW",
+    1041: "ja-JP", 1042: "ko-KR", 1036: "fr-FR", 1031: "de-DE",
+    3082: "es-ES", 1040: "it-IT", 1046: "pt-BR", 1025: "ar-SA",
+    1037: "he-IL", 1054: "th-TH", 1066: "vi-VN", 1045: "pl-PL",
+    1058: "uk-UA", 1029: "cs-CZ", 1043: "nl-NL", 1053: "sv-SE",
+    1030: "da-DK", 1035: "fi-FI", 1044: "nb-NO", 1038: "hu-HU",
+    1048: "ro-RO", 1055: "tr-TR", 1032: "el-GR", 1026: "bg-BG",
+    1050: "hr-HR", 1051: "sk-SK", 1060: "sl-SI",
+}
 
 #: ``EmphasisMark`` int → OOXML ``w:em/@val`` token.
 _EMPHASIS_MARK_TOKEN: dict[int, str] = {
@@ -152,45 +163,46 @@ def render_rPr(
         style_id = _sanitize_style_id(font.style_name.replace(" ", ""))
     if style_id:
         children.append(el("w:rStyle", {"w:val": style_id}))
-    if font.name != base.name:
-        # ``<w:rFonts/>`` carries four script-specific font names; we
-        # mirror the LDM's single ``font.name`` to all four because the
-        # reader only reads ``ascii`` / ``hAnsi`` / ``cs`` / ``eastAsia``
-        # back into one slot.
-        children.append(
-            el(
-                "w:rFonts",
-                {
-                    "w:ascii": font.name,
-                    "w:hAnsi": font.name,
-                    "w:cs": font.name,
-                    "w:eastAsia": font.name,
-                },
-            )
-        )
+    rfont_changed = (
+        font.name != base.name
+        or font.name_ascii != base.name_ascii
+        or font.name_bi != base.name_bi
+        or font.name_far_east != base.name_far_east
+    )
+    if rfont_changed:
+        ascii_name = font.name_ascii or font.name
+        hAnsi_name = font.name
+        cs_name = font.name_bi or font.name
+        ea_name = font.name_far_east or font.name
+        attrs: dict[str, str] = {}
+        if ascii_name:
+            attrs["w:ascii"] = ascii_name
+        if hAnsi_name:
+            attrs["w:hAnsi"] = hAnsi_name
+        if cs_name:
+            attrs["w:cs"] = cs_name
+        if ea_name:
+            attrs["w:eastAsia"] = ea_name
+        if attrs:
+            children.append(el("w:rFonts", attrs))
     for tag, val, base_val in (
         ("w:b", font.bold, base.bold),
+        ("w:bCs", font.bold_bi, base.bold_bi),
         ("w:i", font.italic, base.italic),
+        ("w:iCs", font.italic_bi, base.italic_bi),
         ("w:caps", font.all_caps, base.all_caps),
         ("w:smallCaps", font.small_caps, base.small_caps),
         ("w:strike", font.strike_through, base.strike_through),
-        ("w:vanish", font.hidden, base.hidden),
-        ("w:emboss", font.emboss, base.emboss),
-        ("w:imprint", font.engrave, base.engrave),
         ("w:outline", font.outline, base.outline),
         ("w:shadow", font.shadow, base.shadow),
+        ("w:emboss", font.emboss, base.emboss),
+        ("w:imprint", font.engrave, base.engrave),
+        ("w:noProof", font.no_proofing, base.no_proofing),
+        ("w:vanish", font.hidden, base.hidden),
     ):
         toggle = _bool_toggle(tag, val, base_val)
         if toggle is not None:
             children.append(toggle)
-    if font.text_effect != base.text_effect:
-        children.append(
-            el("w:effect", {"w:val": _TEXT_EFFECT_TOKEN.get(font.text_effect, "none")})
-        )
-    if font.emphasis_mark != base.emphasis_mark:
-        children.append(
-            el("w:em", {"w:val": _EMPHASIS_MARK_TOKEN.get(font.emphasis_mark, "none")})
-        )
     if font.color != base.color:
         color_hex = color_to_hex(font.color)
         if color_hex:
@@ -198,26 +210,21 @@ def render_rPr(
         else:
             children.append(el("w:color", {"w:val": "auto"}))
     if font.kerning != base.kerning:
-        # Position 21 in CT_RPrBase — must precede sz/szCs.
         children.append(el("w:kern", {"w:val": pt_to_half_pt(font.kerning)}))
     if font.size != base.size and font.size > 0:
         sz = pt_to_half_pt(font.size)
         children.append(el("w:sz", {"w:val": sz}))
         children.append(el("w:szCs", {"w:val": sz}))
     if not for_style and font.highlight_color != base.highlight_color:
-        # CT_StyleRPr forbids <w:highlight>; CT_RPr allows it.
         highlight = HIGHLIGHT_NAME_BY_COLOR.get(font.highlight_color, "none")
         children.append(el("w:highlight", {"w:val": highlight}))
     if font.underline != base.underline:
         underline_val = UNDERLINE_VAL.get(font.underline, "none")
         children.append(el("w:u", {"w:val": underline_val}))
-    if font.superscript != base.superscript or font.subscript != base.subscript:
-        if font.superscript:
-            children.append(el("w:vertAlign", {"w:val": "superscript"}))
-        elif font.subscript:
-            children.append(el("w:vertAlign", {"w:val": "subscript"}))
-        else:
-            children.append(el("w:vertAlign", {"w:val": "baseline"}))
+    if font.text_effect != base.text_effect:
+        children.append(
+            el("w:effect", {"w:val": _TEXT_EFFECT_TOKEN.get(font.text_effect, "none")})
+        )
     if font.shading.background_pattern_color != base.shading.background_pattern_color:
         shading_hex = color_to_hex(font.shading.background_pattern_color)
         if shading_hex:
@@ -228,8 +235,6 @@ def render_rPr(
                 )
             )
         elif font.shading.background_pattern_color:
-            # Non-hex sentinel like ``"auto"`` — emit it back as ``w:fill``
-            # verbatim so the reader recovers the same string.
             children.append(
                 el(
                     "w:shd",
@@ -242,6 +247,38 @@ def render_rPr(
             )
         else:
             children.append(el("w:shd", {"w:val": "nil"}))
+    if font.superscript != base.superscript or font.subscript != base.subscript:
+        if font.superscript:
+            children.append(el("w:vertAlign", {"w:val": "superscript"}))
+        elif font.subscript:
+            children.append(el("w:vertAlign", {"w:val": "subscript"}))
+        else:
+            children.append(el("w:vertAlign", {"w:val": "baseline"}))
+    if font.emphasis_mark != base.emphasis_mark:
+        children.append(
+            el("w:em", {"w:val": _EMPHASIS_MARK_TOKEN.get(font.emphasis_mark, "none")})
+        )
+    lang_changed = (
+        (font.locale_id != base.locale_id and font.locale_id)
+        or (font.locale_id_bi != base.locale_id_bi and font.locale_id_bi)
+        or (font.locale_id_far_east != base.locale_id_far_east and font.locale_id_far_east)
+    )
+    if lang_changed:
+        lang_attrs: dict[str, str] = {}
+        if font.locale_id and font.locale_id != base.locale_id:
+            tag = _LCID_TO_LANG_TAG.get(font.locale_id)
+            if tag:
+                lang_attrs["w:val"] = tag
+        if font.locale_id_bi and font.locale_id_bi != base.locale_id_bi:
+            tag = _LCID_TO_LANG_TAG.get(font.locale_id_bi)
+            if tag:
+                lang_attrs["w:bidi"] = tag
+        if font.locale_id_far_east and font.locale_id_far_east != base.locale_id_far_east:
+            tag = _LCID_TO_LANG_TAG.get(font.locale_id_far_east)
+            if tag:
+                lang_attrs["w:eastAsia"] = tag
+        if lang_attrs:
+            children.append(el("w:lang", lang_attrs))
 
     if not children:
         return ""
@@ -394,5 +431,9 @@ def render_run(
     if not instr:
         m = _MD_LINK_RE.match(run.text)
         if m and _URL_RE.match(m.group(2)):
-            return _render_hyperlink_run(m.group(1), m.group(2), run, rels, base_font=base_font)
+            parts = _render_hyperlink_run(m.group(1), m.group(2), run, rels, base_font=base_font)
+            if m.group(3):
+                suffix_run = ldm.Run(text=m.group(3), font=run.font)
+                parts += _render_plain_run(suffix_run, base_font=base_font)
+            return parts
     return _render_plain_run(run, base_font=base_font, instr=instr)

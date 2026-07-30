@@ -17,7 +17,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent))
+sys.path.append(str(_HERE.parent))  # append: must not shadow an installed wheel
 
 import aspose.words_foss as aw  # noqa: E402
 from docs_examples_base import DocsExamplesBase, ARTIFACTS_DIR  # noqa: E402
@@ -40,18 +40,19 @@ class WorkingWithMarkdownSaveOptions(DocsExamplesBase):
     def test_set_encoding(self):
         # ExStart:SetEncoding
         save_options = aw.saving.MarkdownSaveOptions()
-        save_options.encoding = "utf-8-sig"
+        save_options.encoding = "utf-16"
 
         self.convert(
             "test_full_article.docx",
-            "MarkdownSaveOptions.encoding_utf8_bom.md",
+            "MarkdownSaveOptions.encoding_utf16.md",
             save_options=save_options,
         )
         # ExEnd:SetEncoding
 
-        output = Path(ARTIFACTS_DIR) / "MarkdownSaveOptions.encoding_utf8_bom.md"
+        output = Path(ARTIFACTS_DIR) / "MarkdownSaveOptions.encoding_utf16.md"
         raw = output.read_bytes()
-        assert raw[:3] == b"\xef\xbb\xbf", "UTF-8 BOM expected"
+        assert raw[:2] == b"\xff\xfe", "UTF-16 LE BOM expected"
+        assert "Introduction" in raw.decode("utf-16")
 
     def test_set_paragraph_break(self):
         # ExStart:SetParagraphBreak

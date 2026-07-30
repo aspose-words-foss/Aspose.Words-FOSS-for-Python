@@ -1,5 +1,6 @@
 """Document-model enums (bare-int values, no Python ``Enum`` subclassing)."""
 
+from aspose.words_foss.model.enums.image import ImageType  # noqa: F401
 from aspose.words_foss.model.enums.paragraph import (  # noqa: F401
     ParagraphAlignment,
     LineSpacingRule,
@@ -19,6 +20,7 @@ from aspose.words_foss.model.enums.layout import (  # noqa: F401
 )
 from aspose.words_foss.model.enums.border import LineStyle  # noqa: F401
 from aspose.words_foss.model.enums.table import (  # noqa: F401
+    PreferredWidthType,
     CellMerge,
     CellVerticalAlignment,
 )

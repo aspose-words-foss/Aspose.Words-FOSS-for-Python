@@ -17,10 +17,10 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
-sys.path.insert(0, str(_HERE.parent))
+sys.path.append(str(_HERE.parent))  # append: must not shadow an installed wheel
 
 import aspose.words_foss as aw  # noqa: E402
-from docs_examples_base import DocsExamplesBase, ARTIFACTS_DIR  # noqa: E402
+from docs_examples_base import ARTIFACTS_DIR, DocsExamplesBase, MANUAL_DIR  # noqa: E402
 
 
 class WorkingWithPdfSaveOptions(DocsExamplesBase):
@@ -34,7 +34,9 @@ class WorkingWithPdfSaveOptions(DocsExamplesBase):
             "txt": "test_plain.txt",
         }
         for label, filename in inputs.items():
-            self.convert(filename, f"PdfSaveOptions.from_{label}.pdf", save_format=aw.SaveFormat.PDF)
+            self.convert(
+                filename, f"PdfSaveOptions.from_{label}.pdf", save_format=aw.SaveFormat.PDF
+            )
 
     def test_save_with_pdf_save_options(self):
         """PdfSaveOptions is accepted for API compatibility."""

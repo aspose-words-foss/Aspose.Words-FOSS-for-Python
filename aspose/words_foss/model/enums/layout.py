@@ -28,7 +28,10 @@ class SectionStart:
 
 class Orientation:
     """Specifies page orientation.
+
+    Values match ``aspose.words.Orientation`` exactly (``PORTRAIT`` is 1, not
+    0 — the enum is 1-based upstream).
     """
 
-    PORTRAIT = 0
-    LANDSCAPE = 1
+    PORTRAIT = 1
+    LANDSCAPE = 2

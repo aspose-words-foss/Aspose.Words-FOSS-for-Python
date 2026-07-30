@@ -32,13 +32,16 @@ from aspose.words_foss.doc_reader.images import (
     ChildAnchorInfo,
     GroupShapeInfo,
     ShapeAnchor,
+    ShapeCropInfo,
     ShapeLineProps,
     parse_blip_store,
     parse_escher_child_positions,
     parse_plc_spa,
     parse_plcf_txbx_txt,
     parse_shape_blip_map,
+    parse_shape_crop_map,
     parse_shape_line_map,
+    parse_shape_textbox_insets,
     parse_shape_txid_map,
 )
 from aspose.words_foss.doc_reader.lists import ListDef, parse_list_defs, parse_lfo_map
@@ -99,7 +102,9 @@ class DocFileReaderCore:
         # OfficeArt image data
         self._blips: list[BlipInfo] = []
         self._shape_blip_map: dict[int, int] = {}
+        self._shape_crop_map: dict[int, ShapeCropInfo] = {}
         self._shape_line_map: dict[int, ShapeLineProps] = {}
+        self._shape_textbox_insets: dict[int, tuple[int, int, int, int]] = {}
         self._body_shape_anchors: list[ShapeAnchor] = []
         self._hdr_shape_anchors: list[ShapeAnchor] = []
         self._wd_bytes: bytes = b""
@@ -209,7 +214,9 @@ class DocFileReaderCore:
         if lcb_dgg > 0:
             self._blips = parse_blip_store(table, wd, fc_dgg, lcb_dgg)
             self._shape_blip_map = parse_shape_blip_map(table, fc_dgg, lcb_dgg)
+            self._shape_crop_map = parse_shape_crop_map(table, fc_dgg, lcb_dgg)
             self._shape_line_map = parse_shape_line_map(table, fc_dgg, lcb_dgg)
+            self._shape_textbox_insets = parse_shape_textbox_insets(table, fc_dgg, lcb_dgg)
             ca, gi, ctp = parse_escher_child_positions(table, fc_dgg, lcb_dgg)
             self._child_anchors = ca
             self._group_info = gi
@@ -484,6 +491,13 @@ class DocFileReaderCore:
             "shadow",
             "kerning",
             "style_index",
+            "bold_bi",
+            "italic_bi",
+            "no_proofing",
+            "font_index_far_east",
+            "locale_id",
+            "locale_id_bi",
+            "locale_id_far_east",
         ):
             setattr(result, field, getattr(style_cp, field))
         for field in direct_sprms:

@@ -1,6 +1,6 @@
-"""Inline image rendering — turns LDM ``ShapeNode`` into ``<w:drawing>``.
+"""Inline image rendering — turns LDM ``Shape`` into ``<w:drawing>``.
 
-The reader stores image bytes on each ``ShapeNode.image_data``.  The
+The reader stores image bytes on each ``Shape.image_data``.  The
 writer's job is to (a) emit a ``<w:drawing>`` element referencing a
 relationship id, (b) accumulate the image bytes in :class:`ImageRenderState`
 so the package builder can drop them into ``word/media/`` and register a
@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from aspose.words_foss import light_document_model as ldm
+from aspose.words_foss._visible_runs import is_horizontal_rule_shape
 from aspose.words_foss.docx_writer.xml_utils import el
 
 from aspose.words_foss.docx_writer.bookmarks import BookmarkState
@@ -32,7 +33,7 @@ EMU_PER_PT = 12700  # 1 pt = 12700 English Metric Units (OOXML drawing space)
 EMU_PER_MM = 36000  # 1 mm = 36000 EMUs — matches the reader's anchor parsing
 _DEFAULT_IMAGE_PT = 96.0  # ~1.33 inches when reader didn't carry size
 
-# WrapType integer (see ``light_document_model.ShapeNode.wrap_type``) →
+# WrapType integer (see ``light_document_model.Shape.wrap_type``) →
 # OOXML element to emit inside ``<wp:anchor>``.  ``INLINE`` (0) routes
 # through ``<wp:inline>`` and never appears here.
 _WRAP_ELEMENT = {
@@ -77,7 +78,7 @@ def _guess_extension(image: ldm.ImageData) -> str:
     ext = _CT_TO_EXT.get(image.content_type.lower())
     if ext:
         return ext
-    name = image.source_filename or ""
+    name = image.source_full_name or ""
     if "." in name:
         return name.rsplit(".", 1)[1].lower()
     return "bin"
@@ -129,7 +130,7 @@ class ImageRenderState:
     media_name_prefix: str = "image"
     rel_id_prefix: str = "rIdImg"
     doc_pr_offset: int = 0  # starting offset for docPr id allocation
-    # Emit image-less ShapeNodes (text-boxes, cover-page rectangles,
+    # Emit image-less Shapes (text-boxes, cover-page rectangles,
     # side bands) as ``<w:drawing><wps:wsp>`` inside an
     # ``<mc:AlternateContent>`` block with a paired ``<w:pict><v:rect>``
     # VML fallback.  Modern Word picks ``<mc:Choice Requires="wps">``,
@@ -146,11 +147,11 @@ class ImageRenderState:
         """Reuse the rId for an identical byte-for-byte image.
 
         Word documents commonly embed the same logo many times — the reader
-        produces multiple ``ShapeNode``s pointing at distinct in-memory
+        produces multiple ``Shape``s pointing at distinct in-memory
         ``ImageData`` instances with the same bytes.  Keying on the byte
         payload keeps the resulting docx compact and matches the reader's
         de-dup behaviour on next read (one media file → one rId → many
-        ShapeNodes).
+        Shapes).
         """
         existing = self._seen.get(image.image_bytes)
         if existing is not None:
@@ -174,7 +175,7 @@ class ImageRenderState:
 
     def render_inline_shape(
         self,
-        shape: ldm.ShapeNode,
+        shape: ldm.Shape,
         rels: Optional[dict] = None,
         *,
         num_id_map: Optional[Mapping[int, int]] = None,
@@ -199,6 +200,8 @@ class ImageRenderState:
         Returns ``None`` only when the shape has nothing worth emitting
         (no image, no fill, no outline, no text-box content).
         """
+        if is_horizontal_rule_shape(shape):
+            return _render_hr_pict_run(shape, self._next_doc_pr())
         image = shape.image_data
         if image is not None and image.image_bytes:
             rel_id = self._intern_image(image)
@@ -216,10 +219,8 @@ class ImageRenderState:
         # entirely (cover-page bars / floating text-boxes are gone).
         if not self.emit_wps_shapes:
             return None
-        has_fill = bool(shape.shading.background_pattern_color)
-        has_outline = any(
-            b.line_style != 0 or b.line_width > 0 for b in shape.borders
-        )
+        has_fill = bool(shape.fill_color)
+        has_outline = bool(shape.stroke and (shape.stroke.line_style != 0 or shape.stroke.line_width > 0))
         has_text_box = bool(shape.text_box and shape.text_box.get("paragraphs"))
         if not (has_fill or has_outline or has_text_box):
             return None
@@ -261,7 +262,7 @@ def _ext_to_content_type(ext: str) -> str:
 
 
 def _render_drawing_run(
-    shape: ldm.ShapeNode,
+    shape: ldm.Shape,
     rel_id: str,
     doc_pr_id: int,
     *,
@@ -295,7 +296,7 @@ def _render_drawing_run(
         cy = pt_to_emu(height)
 
     name = shape.name or (
-        shape.image_data.source_filename if shape.image_data else f"Picture {doc_pr_id}"
+        shape.image_data.source_full_name if shape.image_data else f"Picture {doc_pr_id}"
     )
 
     graphic = _render_graphic(rel_id, name, cx, cy, shape)
@@ -336,7 +337,7 @@ def _render_graphic(
     name: str,
     cx: int,
     cy: int,
-    shape: ldm.ShapeNode,
+    shape: ldm.Shape,
 ) -> str:
     """Build the shared ``<a:graphic>…<pic:pic/>…</a:graphic>`` subtree."""
     pic_nvPicPr = el(
@@ -350,7 +351,7 @@ def _render_graphic(
     blip_fill_children: list[str] = [el("a:blip", {"r:embed": rel_id})]
     img = shape.image_data
     if img and (img.crop_left or img.crop_top or img.crop_right or img.crop_bottom):
-        attrs: dict[str, int] = {}
+        attrs: dict[str, float] = {}
         if img.crop_left:
             attrs["l"] = img.crop_left
         if img.crop_top:
@@ -415,7 +416,7 @@ _V_ALIGN_TOKEN = {1: "top", 2: "center", 3: "bottom", 4: "inside", 5: "outside"}
 
 
 def _render_anchor(
-    shape: ldm.ShapeNode,
+    shape: ldm.Shape,
     doc_pr_id: int,
     cx: int,
     cy: int,
@@ -439,9 +440,9 @@ def _render_anchor(
     # has_explicit_offset: LDM carries a non-default pt-offset that was
     # the source's exact <wp:posOffset>.  Distinct from "carries a
     # relative_from token" — a wpg child has relativeFrom on the group
-    # but no per-child offset (its offset lives in left/top mm).
+    # but no per-child offset (its offset lives in _page_left_mm/_page_top_mm).
     has_explicit_offset = (
-        shape.horizontal_position != 0.0 or shape.vertical_position != 0.0
+        shape.left != 0.0 or shape.top != 0.0
     )
     has_anchor_metadata = has_explicit_offset or (
         shape.relative_horizontal_position != 0
@@ -459,14 +460,13 @@ def _render_anchor(
         relative_from_h = _H_REL_FROM_TOKEN.get(shape.relative_horizontal_position, "page")
         relative_from_v = _V_REL_FROM_TOKEN.get(shape.relative_vertical_position, "page")
         if relative_from_h in ("margin", "column", "character", "leftMargin"):
-            pos_x_emu = mm_to_emu(shape.left - section_left_margin_mm)
+            pos_x_emu = mm_to_emu(shape._page_left_mm - section_left_margin_mm)
         else:
-            pos_x_emu = mm_to_emu(shape.left)
-        # Reader adds baseline for these relativeFrom values; undo here.
+            pos_x_emu = mm_to_emu(shape._page_left_mm)
         if relative_from_v in ("margin", "paragraph", "line", "topMargin"):
-            pos_y_emu = mm_to_emu(shape.top - section_top_margin_mm)
+            pos_y_emu = mm_to_emu(shape._page_top_mm - section_top_margin_mm)
         else:
-            pos_y_emu = mm_to_emu(shape.top)
+            pos_y_emu = mm_to_emu(shape._page_top_mm)
     elif has_anchor_metadata:
         relative_from_h = _H_REL_FROM_TOKEN.get(shape.relative_horizontal_position, "margin")
         relative_from_v = _V_REL_FROM_TOKEN.get(shape.relative_vertical_position, "margin")
@@ -474,13 +474,13 @@ def _render_anchor(
         # ``wp:extent`` rejects zero); use a non-clamping ``round(...)``
         # for ``wp:posOffset`` since negative offsets are valid (a shape
         # anchored above the paragraph baseline carries ``posV<0``).
-        pos_x_emu = int(round(shape.horizontal_position * EMU_PER_PT))
-        pos_y_emu = int(round(shape.vertical_position * EMU_PER_PT))
+        pos_x_emu = int(round(shape.left * EMU_PER_PT))
+        pos_y_emu = int(round(shape.top * EMU_PER_PT))
     else:
         relative_from_h = "column"
         relative_from_v = "paragraph"
-        pos_x_emu = mm_to_emu(shape.left - section_left_margin_mm)
-        pos_y_emu = mm_to_emu(shape.top - section_top_margin_mm)
+        pos_x_emu = mm_to_emu(shape._page_left_mm - section_left_margin_mm)
+        pos_y_emu = mm_to_emu(shape._page_top_mm - section_top_margin_mm)
     wrap_elem = _WRAP_ELEMENT.get(shape.wrap_type, "wp:wrapNone")
     wrap_attrs = {"wrapText": "bothSides"} if wrap_elem in _WRAP_TEXT_REQUIRED else None
     # CT_WrapTight / CT_WrapThrough require <wp:wrapPolygon> (minOccurs=1).
@@ -509,8 +509,8 @@ def _render_anchor(
             "simplePos": "0",
             "relativeHeight": "1",
             "behindDoc": "1" if shape.behind_text else "0",
-            "locked": "1" if shape.is_locked else "0",
-            "layoutInCell": "1" if shape.layout_in_cell else "0",
+            "locked": "1" if shape.anchor_locked else "0",
+            "layoutInCell": "1" if shape.is_layout_in_cell else "0",
             "allowOverlap": "1" if shape.allow_overlap else "0",
         },
         [
@@ -527,8 +527,8 @@ def _render_anchor(
             el(
                 "wp:positionV",
                 {"relativeFrom": relative_from_v},
-                el("wp:align", None, _V_ALIGN_TOKEN[shape.vertical_anchor_alignment])
-                if shape.vertical_anchor_alignment in _V_ALIGN_TOKEN
+                el("wp:align", None, _V_ALIGN_TOKEN[shape.vertical_alignment])
+                if shape.vertical_alignment in _V_ALIGN_TOKEN
                 else el("wp:posOffset", None, str(pos_y_emu)),
             ),
             el("wp:extent", {"cx": cx, "cy": cy}),
@@ -585,7 +585,7 @@ def _color_to_srgb_hex(color: str) -> Optional[str]:
     return None
 
 
-def _render_wsp_sp_pr(shape: ldm.ShapeNode, cx: int, cy: int) -> str:
+def _render_wsp_sp_pr(shape: ldm.Shape, cx: int, cy: int) -> str:
     """Build the ``<wps:spPr>`` block: xfrm + prstGeom + optional fill / outline."""
     children: list[str] = [
         el(
@@ -595,14 +595,13 @@ def _render_wsp_sp_pr(shape: ldm.ShapeNode, cx: int, cy: int) -> str:
         ),
         el("a:prstGeom", {"prst": "rect"}, el("a:avLst")),
     ]
-    fill_hex = _color_to_srgb_hex(shape.shading.background_pattern_color)
+    fill_hex = _color_to_srgb_hex(shape.fill_color)
     if fill_hex:
         children.append(
             el("a:solidFill", None, el("a:srgbClr", {"val": fill_hex}))
         )
-    for border in shape.borders:
-        if border.line_style == 0 and border.line_width <= 0:
-            continue
+    border = shape.stroke
+    if border and (border.line_style != 0 or border.line_width > 0):
         line_attrs: dict[str, object] = {}
         if border.line_width > 0:
             line_attrs["w"] = int(round(border.line_width * EMU_PER_PT))
@@ -613,7 +612,6 @@ def _render_wsp_sp_pr(shape: ldm.ShapeNode, cx: int, cy: int) -> str:
                 el("a:solidFill", None, el("a:srgbClr", {"val": line_hex}))
             )
         children.append(el("a:ln", line_attrs or None, ln_children))
-        break  # one outline edge is enough for the reader's recovery
     return el("wps:spPr", None, children)
 
 
@@ -628,10 +626,10 @@ _VERT_ANCHOR_TOKEN = {0: "t", 1: "ctr", 2: "b"}
 _DEFAULT_BODY_INS_MM = (2.54, 1.27, 2.54, 1.27)  # (lIns, tIns, rIns, bIns)
 
 
-def _render_wsp_body_pr(shape: ldm.ShapeNode) -> str:
+def _render_wsp_body_pr(shape: ldm.Shape) -> str:
     """Build the ``<wps:bodyPr>`` element carrying vertical alignment + insets."""
     attrs: dict[str, object] = {}
-    anchor = _VERT_ANCHOR_TOKEN.get(shape.vertical_alignment)
+    anchor = _VERT_ANCHOR_TOKEN.get(shape.text_box_anchor)
     if anchor and anchor != "t":
         attrs["anchor"] = anchor
     insets = shape.text_box.get("insets_mm") if shape.text_box else None
@@ -684,8 +682,29 @@ def _render_textbox_paragraphs(
     return el("w:txbxContent", None, body)
 
 
+def _render_hr_pict_run(shape: ldm.Shape, pict_id: int) -> str:
+    """Emit ``<w:r><w:pict><v:rect o:hr="t">`` — how Word stores a horizontal rule."""
+    width_pt = shape.width if shape.width else 432.0
+    height_pt = shape.height if shape.height else 1.5
+    rect = el(
+        "v:rect",
+        {
+            "id": f"_x0000_i{1024 + pict_id}",
+            "style": f"width:{width_pt:.2f}pt;height:{height_pt:.2f}pt",
+            "o:hrpct": "1000",
+            "o:hrstd": "t",
+            "o:hr": "t",
+            "filled": "t",
+            "fillcolor": "gray",
+            "stroked": "f",
+        },
+        el("v:path", {"strokeok": "f"}),
+    )
+    return el("w:r", None, el("w:pict", None, rect))
+
+
 def _render_wsp_drawing_run(
-    shape: ldm.ShapeNode,
+    shape: ldm.Shape,
     doc_pr_id: int,
     *,
     section_left_margin_mm: float = 25.4,
@@ -698,7 +717,7 @@ def _render_wsp_drawing_run(
     style_id_map: Optional[Mapping[str, str]] = None,
     style_font_map: Optional[Mapping[str, ldm.Font]] = None,
 ) -> str:
-    """Render an image-less ShapeNode as ``<w:r><w:drawing><wp:anchor><wps:wsp>``.
+    """Render an image-less Shape as ``<w:r><w:drawing><wp:anchor><wps:wsp>``.
 
     Used for cover-page rectangles, side bands, and stand-alone text
     boxes — anything where the reader recovered the shape via
@@ -816,7 +835,7 @@ def _render_wsp_drawing_run(
 
 
 def _render_vml_fallback(
-    shape: ldm.ShapeNode,
+    shape: ldm.Shape,
     doc_pr_id: int,
     *,
     section_left_margin_mm: float,
@@ -855,7 +874,7 @@ def _render_vml_fallback(
     # textboxes) lands the rect on the *next* page once the anchor's
     # paragraph straddles a page break.
     has_explicit_offset = (
-        shape.horizontal_position != 0.0 or shape.vertical_position != 0.0
+        shape.left != 0.0 or shape.top != 0.0
     )
     if has_explicit_offset:
         relative_from_h = _H_REL_FROM_TOKEN.get(shape.relative_horizontal_position, "margin")
@@ -866,8 +885,8 @@ def _render_vml_fallback(
         h_mm = shape.height if shape.height is not None else 0.0
         width_pt = w_mm / _MM_PER_INCH * _PT_PER_INCH
         height_pt = h_mm / _MM_PER_INCH * _PT_PER_INCH
-        left_pt = shape.horizontal_position
-        top_pt = shape.vertical_position
+        left_pt = shape.left
+        top_pt = shape.top
     else:
         relative_from_h = "page" if is_positioned else "column"
         relative_from_v = "page" if is_positioned else "paragraph"
@@ -897,7 +916,7 @@ def _render_vml_fallback(
         "o:spid": f"_x0000_s{1024 + doc_pr_id}",
         "style": style,
     }
-    fill_hex = _color_to_srgb_hex(shape.shading.background_pattern_color)
+    fill_hex = _color_to_srgb_hex(shape.fill_color)
     if fill_hex:
         rect_attrs["fillcolor"] = f"#{fill_hex}"
     rect_attrs["stroked"] = "f"
@@ -923,7 +942,7 @@ def _render_vml_fallback(
 
 
 def _vml_geometry_pt(
-    shape: ldm.ShapeNode,
+    shape: ldm.Shape,
     is_positioned: bool,
     *,
     section_left_margin_mm: float,
@@ -937,8 +956,8 @@ def _vml_geometry_pt(
         h_mm = shape.height if shape.height is not None else 0.0
         width_pt = w_mm / _MM_PER_INCH * _PT_PER_INCH
         height_pt = h_mm / _MM_PER_INCH * _PT_PER_INCH
-        left_pt = shape.left / _MM_PER_INCH * _PT_PER_INCH
-        top_pt = shape.top / _MM_PER_INCH * _PT_PER_INCH
+        left_pt = shape._page_left_mm / _MM_PER_INCH * _PT_PER_INCH
+        top_pt = shape._page_top_mm / _MM_PER_INCH * _PT_PER_INCH
     else:
         raw_w = shape.width if shape.width and shape.width > 0 else _DEFAULT_IMAGE_PT
         raw_h = shape.height if shape.height and shape.height > 0 else _DEFAULT_IMAGE_PT
@@ -947,12 +966,12 @@ def _vml_geometry_pt(
         # Same baseline subtraction the DrawingML branch uses so the
         # absolute mm coordinates the LDM stores become the same
         # margin-relative offsets in VML.
-        left_pt = (shape.left - section_left_margin_mm) / _MM_PER_INCH * _PT_PER_INCH
-        top_pt = (shape.top - section_top_margin_mm) / _MM_PER_INCH * _PT_PER_INCH
+        left_pt = (shape._page_left_mm - section_left_margin_mm) / _MM_PER_INCH * _PT_PER_INCH
+        top_pt = (shape._page_top_mm - section_top_margin_mm) / _MM_PER_INCH * _PT_PER_INCH
     return width_pt, height_pt, left_pt, top_pt
 
 
-def _vml_inset_attr(shape: ldm.ShapeNode) -> Optional[str]:
+def _vml_inset_attr(shape: ldm.Shape) -> Optional[str]:
     """Return a comma-separated VML ``inset`` attribute (``lIns,tIns,rIns,bIns``)
     in points, or ``None`` when the shape carries no insets."""
     if not shape.text_box:

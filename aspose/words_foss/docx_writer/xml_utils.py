@@ -159,7 +159,9 @@ def text_run(text: str, *, instr: bool = False) -> str:
     return "".join(parts)
 
 
-XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+# No trailing newline: compact mode is a single line, declaration included.
+# ``indent_xml`` puts the declaration back on its own line when pretty-printing.
+XML_DECL = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
 
 
 # Inline content that MUST NOT be re-indented.  Word inherits
@@ -210,7 +212,7 @@ _BLOCK_CONTAINERS: frozenset[str] = frozenset({
 _TAG_OPEN_RE = re.compile(r"<([A-Za-z_][\w:.-]*)\b[^>]*?(/?)>")
 
 
-def indent_xml(xml: str, indent_str: str = "  ") -> str:
+def indent_xml(xml: str, indent_str: str = "\t", newline: str = "\r\n") -> str:
     """Add structural newlines to an XML payload that Word will still open.
 
     Word does *not* tolerate indented whitespace inside ``<w:r>`` (or any
@@ -222,7 +224,8 @@ def indent_xml(xml: str, indent_str: str = "  ") -> str:
     everything inside a paragraph or a property block stays packed onto
     a single line, exactly like the compact output Word accepts.
 
-    ``indent_str`` controls how deep each new line is pushed.  Self-closing
+    ``indent_str`` and ``newline`` default to one TAB per level and CRLF.
+    Self-closing
     and content-bearing tags are treated identically: a newline is
     emitted before each direct child of a structural container, and the
     container's own closing tag is pushed onto its own line.
@@ -267,20 +270,20 @@ def indent_xml(xml: str, indent_str: str = "  ") -> str:
                     tag, was_block = stack.pop()
                     if was_block:
                         # newline + indent at the container's own depth
-                        out_parts.append("\n" + _pad(len(stack)))
+                        out_parts.append(newline + _pad(len(stack)))
                 out_parts.append(tag_text)
                 pending_newline = False
             elif m and m.group(2) == "/":
                 # self-closing
                 if stack and stack[-1][1]:
-                    out_parts.append("\n" + _pad(len(stack)))
+                    out_parts.append(newline + _pad(len(stack)))
                 out_parts.append(tag_text)
                 pending_newline = False
             elif m:
                 tag = m.group(1)
                 is_block = tag in _BLOCK_CONTAINERS
                 if stack and stack[-1][1]:
-                    out_parts.append("\n" + _pad(len(stack)))
+                    out_parts.append(newline + _pad(len(stack)))
                 out_parts.append(tag_text)
                 stack.append((tag, is_block))
                 pending_newline = False
@@ -294,7 +297,7 @@ def indent_xml(xml: str, indent_str: str = "  ") -> str:
             end_idx = body.index("\x00", pos + 1) + 1
             placeholder = body[pos:end_idx]
             if stack and stack[-1][1]:
-                out_parts.append("\n" + _pad(len(stack)))
+                out_parts.append(newline + _pad(len(stack)))
             out_parts.append(placeholder)
             pos = end_idx
         else:
@@ -313,5 +316,5 @@ def indent_xml(xml: str, indent_str: str = "  ") -> str:
         result = result.replace(f"\x00P{i}\x00", p)
 
     if decl:
-        return decl + "\n" + result + "\n"
-    return result + "\n"
+        return decl + newline + result + newline
+    return result + newline

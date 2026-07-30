@@ -4,6 +4,7 @@
 from typing import Mapping, Optional
 
 from aspose.words_foss import light_document_model as ldm
+from aspose.words_foss.model.enums.table import PreferredWidthType as _PWT
 
 from aspose.words_foss.docx_writer.bookmarks import BookmarkState
 from aspose.words_foss.docx_writer.drawing import ImageRenderState
@@ -48,19 +49,22 @@ _VERT_MERGE_VAL = {0: None, 1: "restart", 2: "continue"}
 
 def _border_element(name: str, border: ldm.Border) -> str:
     val = LINE_STYLE_VAL.get(border.line_style, "none")
-    # ``border.line_width`` is preserved as-is — the previous code's
-    # ``or 0.5`` fallback inflated empty borders into a visible 0.5pt
-    # line on round-trip.  ``pt_to_eighths`` already clamps to ``>= 1``
-    # for the legitimate non-zero case (Word's smallest supported width).
     sz = pt_to_eighths(border.line_width) if border.line_width else 0
     color = color_to_hex(border.color) or "auto"
-    return el(
-        f"w:{name}",
-        {"w:val": val, "w:sz": sz, "w:space": 0, "w:color": color},
-    )
+    space = int(border.distance_from_text) if border.distance_from_text else 0
+    attrs: dict[str, object] = {
+        "w:val": val, "w:sz": sz, "w:space": space, "w:color": color,
+    }
+    if border.shadow:
+        attrs["w:shadow"] = "1"
+    return el(f"w:{name}", attrs)
 
 
 def _is_empty_border(border: ldm.Border) -> bool:
+    if not border.is_visible:
+        # Explicit ``w:val="none"`` suppresses an inherited (style) border;
+        # it must be emitted, not skipped.
+        return False
     return border.line_style == 0 and border.line_width == 0.0
 
 
@@ -118,60 +122,20 @@ def _cell_borders(borders: list[ldm.Border]) -> str:
     return el("w:tcBorders", None, sides) if sides else ""
 
 
-def _preferred_width_attrs(value: str) -> dict[str, object]:
-    """Parse an LDM ``preferred_width`` string into OOXML ``w:tblW`` /
-    ``w:tcW`` attributes.
-
-    Accepts every form the reader and the test fixtures can produce,
-    plus the bare ``PreferredWidthType`` enum names so consumers can
-    construct a value-less ``"Auto"`` / ``"Percent"`` / ``"Points"``
-    placeholder:
-
-    * ``""`` / ``"Auto"``         → ``w:type="auto"`` ()
-    * ``"<N>%"``                  → ``w:type="pct"``  (fifty-units-per-percent)
-    * ``"<N>pt"`` or bare ``"<N>"`` → ``w:type="dxa"`` (points converted to twips per the OOXML schema)
-    * ``"Percent"`` / ``"Points"`` → corresponding type, ``w=0``
-      (degenerate but legal OOXML — matches the
-      ``PreferredWidthType`` enum names verbatim)
-    * Anything else → ``w:type="auto"`` fallback so a malformed
-      value never breaks the document.
+def _preferred_width_attrs(pw: ldm.PreferredWidth) -> dict[str, object]:
+    """Convert a :class:`PreferredWidth` into OOXML ``w:tblW`` / ``w:tcW``
+    attributes (``w:w`` + ``w:type``).
     """
-    txt = (value or "").strip()
-    if not txt or txt == "Auto":
-        return {"w:w": 0, "w:type": "auto"}
-    if txt == "Percent":
-        return {"w:w": 0, "w:type": "pct"}
-    if txt == "Points":
-        return {"w:w": 0, "w:type": "dxa"}
-    if txt.endswith("%"):
-        try:
-            pct = float(txt[:-1]) * 50.0  # _PCT_DIVISOR inverse
-        except ValueError:
-            return {"w:w": 0, "w:type": "pct"}
-        return {"w:w": int(round(pct)), "w:type": "pct"}
-    if txt.endswith("pt"):
-        try:
-            pt = float(txt[:-2])
-        except ValueError:
-            return {"w:w": 0, "w:type": "dxa"}
-        return {"w:w": pt_to_twips(pt), "w:type": "dxa"}
-    # Bare numeric — ``PreferredWidthType.Points``: interpret
-    # as points and convert to twips.
-    try:
-        pt = float(txt)
-    except ValueError:
-        return {"w:w": 0, "w:type": "auto"}
-    return {"w:w": pt_to_twips(pt), "w:type": "dxa"}
+    if pw.type == _PWT.PERCENT:
+        return {"w:w": int(round(pw.value * 50.0)), "w:type": "pct"}
+    if pw.type == _PWT.POINTS:
+        return {"w:w": pt_to_twips(pw.value), "w:type": "dxa"}
+    return {"w:w": 0, "w:type": "auto"}
 
 
-def _is_auto_preferred_width(value: str) -> bool:
-    """``True`` when *value* names the ``PreferredWidthType.Auto`` case."""
-    return not value or value.strip() in ("", "Auto")
-
-
-def _render_tblW(value: str) -> str:
-    """Render ``<w:tblW>`` from an LDM ``preferred_width`` string."""
-    return el("w:tblW", _preferred_width_attrs(value))
+def _render_tblW(pw: ldm.PreferredWidth) -> str:
+    """Render ``<w:tblW>`` from a :class:`PreferredWidth`."""
+    return el("w:tblW", _preferred_width_attrs(pw))
 
 
 def _render_tcMar(fmt: ldm.CellFormat) -> str:
@@ -211,7 +175,7 @@ def _tcPr(cell: ldm.Cell) -> str:
     # last produced a schema-invalid order that Word flags as document
     # corruption (other parsers accept it silently).
     if fmt.conditional_style:
-        children.append(el("w:cnfStyle", {"w:val": fmt.conditional_style}))
+        children.append(el("w:cnfStyle", {"w:val": fmt.conditional_style.to_val()}))
 
     # Always emit <w:tcW/> — Word / Aspose fixtures carry it on every
     # cell, falling back to ``w:type="auto"`` when no explicit width.
@@ -354,7 +318,7 @@ def _trPr(row: ldm.Row) -> str:
     # last produced a schema-invalid order that Word flags as document
     # corruption (other parsers accept it silently).
     if fmt.conditional_style:
-        children.append(el("w:cnfStyle", {"w:val": fmt.conditional_style}))
+        children.append(el("w:cnfStyle", {"w:val": fmt.conditional_style.to_val()}))
     if not fmt.allow_break_across_pages:
         children.append(el("w:cantSplit"))
     if fmt.height > 0:
@@ -380,9 +344,9 @@ def _render_row(
 ) -> str:
     children: list[str] = []
     # CT_Row order: tblPrEx (0), trPr (1), tc (2+).
-    if not _is_auto_preferred_width(row.row_format.preferred_width):
+    if not row.preferred_width.is_auto:
         children.append(
-            el("w:tblPrEx", None, _render_tblW(row.row_format.preferred_width))
+            el("w:tblPrEx", None, _render_tblW(row.preferred_width))
         )
     trPr = _trPr(row)
     if trPr:
@@ -475,6 +439,10 @@ def _tblPr(
             )
     if margins:
         children.append(el("w:tblCellMar", None, margins))
+    if table.title:
+        children.append(el("w:tblCaption", {"w:val": table.title}))
+    if table.description:
+        children.append(el("w:tblDescription", {"w:val": table.description}))
 
     if not children:
         return ""

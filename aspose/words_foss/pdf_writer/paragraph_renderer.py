@@ -12,7 +12,7 @@ from typing import Optional
 from fpdf import FPDF
 
 from aspose.words_foss import light_document_model as ldm
-from aspose.words_foss._visible_runs import visible_runs
+from aspose.words_foss._visible_runs import is_horizontal_rule_shape, visible_runs
 from aspose.words_foss.model.wrap_type import WrapType
 from aspose.words_foss.pdf_writer.constants import (
     CODE_BLOCK_BG_RGB,
@@ -21,6 +21,10 @@ from aspose.words_foss.pdf_writer.constants import (
     DEFAULT_QUOTE_INDENT_MM,
     FPDF_ALIGN,
     LINE_HEIGHT_FACTOR,
+    BOTTOM_BORDER_SLOT,
+    HORIZONTAL_RULE_CHARS,
+    HORIZONTAL_RULE_MIN_WIDTH_PT,
+    HORIZONTAL_RULE_RGB,
     LIST_INDENT_PER_LEVEL_MM,
     PT_TO_MM,
     QUOTE_TEXT_RGB,
@@ -96,8 +100,8 @@ def _expand_number_format(
         ch = fmt[i]
         if ch == "%" and i + 1 < len(fmt) and fmt[i + 1].isdigit():
             lvl_idx = int(fmt[i + 1]) - 1
-            if 0 <= lvl_idx < len(lst.levels):
-                style = lst.levels[lvl_idx].number_style
+            if 0 <= lvl_idx < len(lst.list_levels):
+                style = lst.list_levels[lvl_idx].number_style
             else:
                 style = current_style
             counter = counters.get((lst.list_id, lvl_idx), 0)
@@ -176,22 +180,21 @@ class ParagraphRenderer:
     ) -> None:
         """Draw shapes anchored ``relative_vertical_position == Paragraph``.
 
-        The shape's ``vertical_position`` field carries the raw OOXML
+        The shape's ``top`` field carries the raw OOXML
         ``<wp:positionV/posOffset>`` in points; convert to mm and add
         the paragraph's actual top Y so the shape lands where Word
-        places it (e.g. an absolutely-positioned date stamp
-        18.81 cm below the cover-page paragraph).
+        places it.
         """
         extras = [
             e for e in para._children
-            if isinstance(e, ldm.ShapeNode) and e._is_positioned
+            if isinstance(e, ldm.Shape) and e._is_positioned
             and e.relative_vertical_position == 2
         ]
         if not extras:
             return
         saved_x, saved_y = pdf.get_x(), pdf.get_y()
         for shape in extras:
-            y_mm = paragraph_top_y + shape.vertical_position * PT_TO_MM
+            y_mm = paragraph_top_y + shape.top * PT_TO_MM
             self._writer._shape_renderer.render_positioned_shape(
                 pdf, shape, y_override=y_mm,
             )
@@ -216,7 +219,7 @@ class ParagraphRenderer:
         chars_per_line = max(1, int(usable_w / char_w))
         num_lines = 0
         for line in text.split("\n") or [""]:
-            num_lines += max(1, (len(line) // chars_per_line) + 1)
+            num_lines += max(1, (len(line) + chars_per_line - 1) // chars_per_line)
         est_height = num_lines * line_h + pf.space_before * PT_TO_MM + pf.space_after * PT_TO_MM
         remaining = w._page_height - w._page_margin_bottom - pdf.get_y()
         if est_height > remaining and est_height < (w._page_height - w._page_margin_bottom - pdf.t_margin):
@@ -301,7 +304,7 @@ class ParagraphRenderer:
 
         # ``is_inline=None`` (untagged shapes from older fixtures) is treated as inline.
         has_mixed = any(
-            isinstance(i, ldm.ShapeNode)
+            isinstance(i, ldm.Shape)
             and i.has_image
             and i.is_inline is not False
             and not i._is_positioned
@@ -314,7 +317,7 @@ class ParagraphRenderer:
 
         # Legacy path: no inline images — emit any standalone shapes first.
         for item in para._children:
-            if isinstance(item, ldm.ShapeNode):
+            if isinstance(item, ldm.Shape):
                 if item._is_positioned or item.wrap_type == WrapType.NONE:
                     continue
                 if item.is_inline is False:
@@ -322,7 +325,7 @@ class ParagraphRenderer:
                     continue
                 if item.has_image and item.image_data is not None:
                     w._shape_renderer.render_shape(pdf, item)
-                elif item.text_box:
+                elif item.text_box or is_horizontal_rule_shape(item):
                     w._shape_renderer.render_shape(pdf, item)
 
         pf = para.paragraph_format
@@ -360,6 +363,10 @@ class ParagraphRenderer:
 
         # Apply space before
         self._apply_space_before(pdf, pf)
+
+        if self._is_horizontal_rule(pf, runs):
+            self._draw_horizontal_rule(pdf, pf)
+            return
 
         # Heading
         if pf.is_heading:
@@ -432,7 +439,7 @@ class ParagraphRenderer:
             marker_indent_mm = max(0.0, text_indent_mm + pf.first_line_indent * PT_TO_MM)
             label = list_label.label_string if list_label and list_label.label_string else ""
             if not label:
-                label = self._compute_list_label(list_format) or "-"
+                label = self._compute_list_label(list_format)
             with w._tag(pdf, "/LI"):
                 run_size = get_dominant_font_size(runs)
                 effective_fs = run_size if run_size > 0 else fs
@@ -440,10 +447,9 @@ class ParagraphRenderer:
                 if marker_indent_mm > 0:
                     pdf.cell(w=marker_indent_mm)
                 pdf.set_font(DEFAULT_FONT_NAME, size=effective_fs)
-                pdf.write(h=line_h, text=safe_text(f"{label}"))
-                pad = text_indent_mm - marker_indent_mm
-                if pad > 0:
-                    pdf.write(h=line_h, text=" ")
+                if label:
+                    pdf.write(h=line_h, text=safe_text(f"{label} "))
+                if text_indent_mm > marker_indent_mm:
                     pdf.set_x(pdf.l_margin + text_indent_mm)
                 w._run_renderer.render_formatted_runs(
                     pdf,
@@ -509,7 +515,7 @@ class ParagraphRenderer:
             )
 
         for item in para._children:
-            if isinstance(item, ldm.ShapeNode):
+            if isinstance(item, ldm.Shape):
                 if item._is_positioned or item.wrap_type == WrapType.NONE:
                     continue  # drawn by positioned/floating pass
                 if item.is_inline is False:
@@ -529,6 +535,25 @@ class ParagraphRenderer:
     # List label helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _is_horizontal_rule(pf: ldm.ParagraphFormat, runs: list[ldm.Run]) -> bool:
+        if not pf.borders or len(pf.borders) <= BOTTOM_BORDER_SLOT:
+            return False
+        bottom = pf.borders[BOTTOM_BORDER_SLOT]
+        if bottom.line_style <= 0 or bottom.line_width < HORIZONTAL_RULE_MIN_WIDTH_PT:
+            return False
+        return not any((run.text or "").strip(HORIZONTAL_RULE_CHARS) for run in runs)
+
+    def _draw_horizontal_rule(self, pdf: FPDF, pf: ldm.ParagraphFormat) -> None:
+        w = self._writer
+        y = pdf.get_y() + self.line_height_mm(DEFAULT_FONT_SIZE_PT, pf) / 2
+        bottom = pf.borders[BOTTOM_BORDER_SLOT]
+        pdf.set_line_width(bottom.line_width * PT_TO_MM)
+        pdf.set_draw_color(*HORIZONTAL_RULE_RGB)
+        pdf.line(w._page_margin_left, y, w._page_width - w._page_margin_right, y)
+        pdf.set_y(y)
+        self._apply_space_after(pdf, pf)
+
     def _compute_list_label(
         self, list_format: ldm.ListFormat
     ) -> Optional[str]:
@@ -539,14 +564,16 @@ class ParagraphRenderer:
             return None
         list_id = list_format.list_id
         level = list_format.list_level_number
-        lst = next((dl for dl in doc.lists if dl.list_id == list_id), None)
-        if lst is None or not lst.levels:
+        lst = doc.get_list(list_id)
+        if lst is None or not lst.list_levels:
             return None
-        if level >= len(lst.levels):
-            level = len(lst.levels) - 1
-        lvl = lst.levels[level]
+        lvl = doc.resolve_list_level(list_id, level)
+        if lvl is None:
+            return None
+        if level >= len(lst.list_levels):
+            level = len(lst.list_levels) - 1
         if lvl.number_style in (23, 255):
-            return "•"
+            return lvl.number_format
 
         key = (list_id, level)
         counters = w._list_counters

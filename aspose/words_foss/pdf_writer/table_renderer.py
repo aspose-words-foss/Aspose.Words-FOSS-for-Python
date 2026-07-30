@@ -62,7 +62,7 @@ class TableRenderer:
 
         # If any cell has images, render as flowing paragraphs rather than a fixed grid
         has_cell_images = any(
-            isinstance(item, ldm.ShapeNode) and item.has_image
+            isinstance(item, ldm.Shape) and item.has_image
             for row in table.rows
             for cell in row.cells
             for para in cell.paragraphs
@@ -257,9 +257,6 @@ class TableRenderer:
         col_y_map = getattr(w, "_active_col_y", None)
         anchor_y = saved_y
         if spec == "right" and col_y_map:
-            anchor_y = col_y_map.get(col_y_map and (len(col_y_map) - 1) or 0, saved_y)
-            # Pick the rightmost known column; multi-col docs almost
-            # always have ncols ≤ 2 so the last key is the right side.
             anchor_y = col_y_map.get(max(col_y_map), saved_y)
         float_y = anchor_y + y_offset_mm
 

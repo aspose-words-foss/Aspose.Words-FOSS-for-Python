@@ -103,7 +103,7 @@ class TableBuilder:
             tbl.alignment = _ALIGNMENT_MAP.get(jc.get(f"{W_NS}val", "left"), 0)
         tblW = tblPr.find(f"{W_NS}tblW")
         if tblW is not None:
-            tbl.preferred_width = self._format_preferred_width(tblW)
+            tbl.preferred_width = self._parse_preferred_width(tblW)
         tblInd = tblPr.find(f"{W_NS}tblInd")
         if tblInd is not None:
             tbl.left_indent = int(tblInd.get(f"{W_NS}w", "0")) / _TWIPS_PER_PT
@@ -117,19 +117,23 @@ class TableBuilder:
         tblpPr = tblPr.find(f"{W_NS}tblpPr")
         if tblpPr is not None:
             self._apply_floating(tbl, tblpPr)
+        caption = tblPr.find(f"{W_NS}tblCaption")
+        if caption is not None:
+            tbl.title = caption.get(f"{W_NS}val", "")
+        desc = tblPr.find(f"{W_NS}tblDescription")
+        if desc is not None:
+            tbl.description = desc.get(f"{W_NS}val", "")
         return borders
 
     @staticmethod
-    def _format_preferred_width(tblW: ET.Element) -> str:
+    def _parse_preferred_width(tblW: ET.Element) -> ldm.PreferredWidth:
         w_type = tblW.get(f"{W_NS}type", "")
         w_val = tblW.get(f"{W_NS}w", "0")
         if w_type == "pct":
-            return f"{int(w_val) / _PCT_DIVISOR}%"
+            return ldm.PreferredWidth.from_percent(int(w_val) / _PCT_DIVISOR)
         if w_type == "dxa":
-            return f"{int(w_val) / _TWIPS_PER_PT}pt"
-        if w_type == "auto":
-            return "Auto"
-        return ""
+            return ldm.PreferredWidth.from_points(int(w_val) / _TWIPS_PER_PT)
+        return ldm.PreferredWidth.auto()
 
     @staticmethod
     def _apply_floating(tbl: ldm.Table, tblpPr: ET.Element) -> None:
@@ -187,7 +191,7 @@ class RowBuilder:
         if tblPrEx is not None:
             tblW = tblPrEx.find(f"{W_NS}tblW")
             if tblW is not None:
-                row.row_format.preferred_width = TableBuilder._format_preferred_width(tblW)
+                row.preferred_width = TableBuilder._parse_preferred_width(tblW)
         for tc_elem in tr_elem.findall(f"{W_NS}tc"):
             row.cells.append(self._cell_builder.build(tc_elem, default_paddings))
         return row
@@ -211,7 +215,7 @@ class RowBuilder:
             rf.allow_break_across_pages = False
         cnf = trPr.find(f"{W_NS}cnfStyle")
         if cnf is not None:
-            rf.conditional_style = cnf.get(f"{W_NS}val", "")
+            rf.conditional_style = ldm.ConditionalStyleMask.from_val(cnf.get(f"{W_NS}val", ""))
         return rf
 
 
@@ -274,7 +278,7 @@ class CellBuilder:
         self._apply_no_wrap(tcPr, cf)
         cnf = tcPr.find(f"{W_NS}cnfStyle")
         if cnf is not None:
-            cf.conditional_style = cnf.get(f"{W_NS}val", "")
+            cf.conditional_style = ldm.ConditionalStyleMask.from_val(cnf.get(f"{W_NS}val", ""))
         return cf
 
     @staticmethod
@@ -286,11 +290,11 @@ class CellBuilder:
         w_val = tcW.get(f"{W_NS}w", "0")
         if w_type == "dxa":
             cf.width = int(w_val) / _TWIPS_PER_PT
-            cf.preferred_width = f"{cf.width}pt"
+            cf.preferred_width = ldm.PreferredWidth.from_points(cf.width)
         elif w_type == "pct":
-            cf.preferred_width = f"{int(w_val) / _PCT_DIVISOR}%"
+            cf.preferred_width = ldm.PreferredWidth.from_percent(int(w_val) / _PCT_DIVISOR)
         elif w_type == "auto":
-            cf.preferred_width = "Auto"
+            cf.preferred_width = ldm.PreferredWidth.auto()
 
     @staticmethod
     def _apply_vertical_align(tcPr: ET.Element, cf: ldm.CellFormat) -> None:

@@ -101,6 +101,9 @@ def _is_empty_border(border: "ldm.Border") -> bool:
     Accepts both ``Color [Empty]`` (the reader's canonical placeholder)
     and the bare ``Border()`` Pydantic default (``color=""``).
     """
+    if not border.is_visible:
+        # An explicit ``none`` override is meaningful, not empty.
+        return False
     return (
         not border.line_style
         and not border.line_width

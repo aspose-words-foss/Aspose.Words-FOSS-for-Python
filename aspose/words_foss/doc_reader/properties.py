@@ -28,8 +28,15 @@ from aspose.words_foss.doc_reader.constants import (
     SPRM_CISTD,
     SPRM_CCV,
     SPRM_CKUL,
+    SPRM_CFBOLDBI,
+    SPRM_CFITALICBI,
+    SPRM_CFNOPROOF,
     SPRM_CPICLOCATION,
     SPRM_CRGFTC0,
+    SPRM_CRGFTC1,
+    SPRM_CRGLID0,
+    SPRM_CRGLID1,
+    SPRM_CRGLID2,
     SPRM_PBRCBOTTOM80,
     SPRM_PBRCLEFT80,
     SPRM_PBRCRIGHT80,
@@ -94,6 +101,8 @@ from aspose.words_foss.doc_reader.constants import (
     SPRM_TTABLEBORDERS,
     SPRM_TTABLEBORDERS80,
     SPRM_TPROPREV,
+    SPRM_TCELLPADDINGDEFAULT,
+    SPRM_TCELLPADDING,
 )
 from aspose.words_foss.model.enums import LineSpacingRule
 
@@ -179,6 +188,13 @@ class CharProps:
         self.style_index: int = -1  # character style index
         self.is_special: bool = False  # fSpec — inline picture, symbol, etc.
         self.pic_location: int = -1  # offset into Data stream for inline picture
+        self.bold_bi: bool = False
+        self.italic_bi: bool = False
+        self.no_proofing: bool = False
+        self.font_index_far_east: int = -1
+        self.locale_id: int = 0
+        self.locale_id_bi: int = 0
+        self.locale_id_far_east: int = 0
         self._set_fields: set[str] = set()  # which fields were directly set
         self._toggle_fields: set[str] = set()  # fields set via 0x81 toggle SPRM
 
@@ -254,7 +270,7 @@ def _fc_to_cp(fc: int, pieces: list[tuple[int, int, int, bool]], fallback_offset
     for cp_s, cp_e, fc_bs, f_compressed in pieces:
         bytes_per_char = 1 if f_compressed else 2
         byte_len = (cp_e - cp_s) * bytes_per_char
-        if fc_bs <= fc <= fc_bs + byte_len:
+        if fc_bs <= fc < fc_bs + byte_len:
             return cp_s + (fc - fc_bs) // bytes_per_char
     if fallback_compressed:
         return fc - fallback_offset
@@ -751,6 +767,37 @@ def apply_char_sprms(props: CharProps, sprms: dict[int, bytes]) -> None:
     if SPRM_CISTD in sprms:
         props.style_index = struct.unpack_from("<H", sprms[SPRM_CISTD])[0]
 
+    # Bold/italic for complex script (BiDi) text
+    if SPRM_CFBOLDBI in sprms:
+        operand = sprms[SPRM_CFBOLDBI][0]
+        props.bold_bi = apply_toggle(props.bold_bi, operand)
+        if operand == 0x81:
+            props._toggle_fields.add("bold_bi")
+    if SPRM_CFITALICBI in sprms:
+        operand = sprms[SPRM_CFITALICBI][0]
+        props.italic_bi = apply_toggle(props.italic_bi, operand)
+        if operand == 0x81:
+            props._toggle_fields.add("italic_bi")
+
+    # No proofing
+    if SPRM_CFNOPROOF in sprms:
+        operand = sprms[SPRM_CFNOPROOF][0]
+        props.no_proofing = apply_toggle(props.no_proofing, operand)
+        if operand == 0x81:
+            props._toggle_fields.add("no_proofing")
+
+    # Font index (Far East text)
+    if SPRM_CRGFTC1 in sprms:
+        props.font_index_far_east = struct.unpack_from("<H", sprms[SPRM_CRGFTC1])[0]
+
+    # Language IDs
+    if SPRM_CRGLID0 in sprms and len(sprms[SPRM_CRGLID0]) >= 2:
+        props.locale_id = struct.unpack_from("<H", sprms[SPRM_CRGLID0])[0]
+    if SPRM_CRGLID1 in sprms and len(sprms[SPRM_CRGLID1]) >= 2:
+        props.locale_id_bi = struct.unpack_from("<H", sprms[SPRM_CRGLID1])[0]
+    if SPRM_CRGLID2 in sprms and len(sprms[SPRM_CRGLID2]) >= 2:
+        props.locale_id_far_east = struct.unpack_from("<H", sprms[SPRM_CRGLID2])[0]
+
     # Inline picture / special character
     if SPRM_CFSPEC in sprms:
         props.is_special = sprms[SPRM_CFSPEC][0] != 0
@@ -784,6 +831,13 @@ def get_char_sprm_fields(sprms: dict[int, bytes]) -> set[str]:
         SPRM_CFEMBOSS: "emboss",
         SPRM_CFIMPRINT: "engrave",
         SPRM_CISTD: "style_index",
+        SPRM_CFBOLDBI: "bold_bi",
+        SPRM_CFITALICBI: "italic_bi",
+        SPRM_CFNOPROOF: "no_proofing",
+        SPRM_CRGFTC1: "font_index_far_east",
+        SPRM_CRGLID0: "locale_id",
+        SPRM_CRGLID1: "locale_id_bi",
+        SPRM_CRGLID2: "locale_id_far_east",
     }
     for sprm_code in sprms:
         if sprm_code in mapping:
@@ -888,6 +942,10 @@ class TableRowProps:
         # order: top, left, bottom, right, insideH, insideV
         self.borders: list[tuple[int, float, str, int]] = []
         self.horz_pos: int = -1  # 0=left, 1=center, 2=right from TPROPREV pcHorz
+        # Default cell margins for the whole table (tblCellMar), side -> points.
+        self.default_padding: dict[str, float] = {}
+        # Per-cell-range margin overrides (tcMar): (itcFirst, itcLim, {side: pt}).
+        self.cell_padding: list[tuple[int, int, dict[str, float]]] = []
 
 
 def _parse_brc_borders(data: bytes) -> list[tuple[int, float, str, int]]:
@@ -907,6 +965,41 @@ def _parse_brc_borders(data: bytes) -> list[tuple[int, float, str, int]]:
         width_pt = dpt_line_width / 8.0
         borders.append((brc_type, width_pt, color_str, dpt_space))
     return borders
+
+
+_CELL_MARGIN_SIDES = (
+    (0x01, "top"),
+    (0x02, "left"),
+    (0x04, "bottom"),
+    (0x08, "right"),
+)
+
+
+def _parse_cell_padding_operand(
+    operand: bytes,
+) -> tuple[int, int, dict[str, float]]:
+    """Decode a cell-margin operand (sprmTCellPadding / ...Default).
+
+    Layout: ``itcFirst(1) itcLim(1) grfbrc(1) ftsWidth(1) wWidth(2 LE)``.
+    ``grfbrc`` selects which sides the single ``wWidth`` applies to.
+    Only ``ftsWidth == 3`` (FtsDxa, twips) carries a real measurement;
+    other unit types leave the margins unset.  Returns the cell range
+    ``[itcFirst, itcLim)`` plus the side -> points mapping.
+    """
+    if len(operand) < 6:
+        return 0, 0, {}
+    itc_first = operand[0]
+    itc_lim = operand[1]
+    grfbrc = operand[2]
+    fts_width = operand[3]
+    w_width = struct.unpack_from("<H", operand, 4)[0]
+    sides: dict[str, float] = {}
+    if fts_width == 3:
+        value_pt = w_width / 20.0
+        for bit, side in _CELL_MARGIN_SIDES:
+            if grfbrc & bit:
+                sides[side] = value_pt
+    return itc_first, itc_lim, sides
 
 
 def _parse_brc80_borders(data: bytes) -> list[tuple[int, float, str, int]]:
@@ -980,6 +1073,13 @@ def parse_table_row_sprms(grpprl: bytes) -> TableRowProps:
                 elif sprm == SPRM_TTABLEBORDERS80 and len(operand_6) >= 24:
                     if not props.borders:
                         props.borders = _parse_brc80_borders(operand_6)
+                elif sprm == SPRM_TCELLPADDINGDEFAULT and len(operand_6) >= 6:
+                    _, _, sides = _parse_cell_padding_operand(operand_6)
+                    props.default_padding.update(sides)
+                elif sprm == SPRM_TCELLPADDING and len(operand_6) >= 6:
+                    itc_first, itc_lim, sides = _parse_cell_padding_operand(operand_6)
+                    if sides:
+                        props.cell_padding.append((itc_first, itc_lim, sides))
                 pos += 3 + op_size
             else:
                 break

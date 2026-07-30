@@ -113,23 +113,31 @@ class FontBuilder:
         self._apply_style_ref(rPr, font)
         self._apply_shading(rPr, font)
         self._apply_kerning(rPr, font)
+        self._apply_locale(rPr, font)
         return font
 
     def _apply_name(self, rPr: ET.Element, font: ldm.Font) -> None:
         rFonts = rPr.find(f"{W_NS}rFonts")
         if rFonts is None:
             return
-        explicit = (
-            rFonts.get(f"{W_NS}ascii", "")
-            or rFonts.get(f"{W_NS}hAnsi", "")
-            or rFonts.get(f"{W_NS}cs", "")
-        )
+        ascii_name = rFonts.get(f"{W_NS}ascii", "")
+        hAnsi_name = rFonts.get(f"{W_NS}hAnsi", "")
+        cs_name = rFonts.get(f"{W_NS}cs", "")
+        ea_name = rFonts.get(f"{W_NS}eastAsia", "")
+        explicit = ascii_name or hAnsi_name or cs_name
         if explicit:
             font.name = explicit
-            return
-        theme = rFonts.get(f"{W_NS}asciiTheme", "") or rFonts.get(f"{W_NS}hAnsiTheme", "")
-        if theme:
-            font.name = self._ctx._resolve_theme_font(theme)
+        else:
+            theme = rFonts.get(f"{W_NS}asciiTheme", "") or rFonts.get(f"{W_NS}hAnsiTheme", "")
+            if theme:
+                font.name = self._ctx._resolve_theme_font(theme)
+        primary = font.name
+        if ascii_name and ascii_name != primary:
+            font.name_ascii = ascii_name
+        if cs_name and cs_name != primary:
+            font.name_bi = cs_name
+        if ea_name and ea_name != primary:
+            font.name_far_east = ea_name
 
     @staticmethod
     def _apply_size(rPr: ET.Element, font: ldm.Font) -> None:
@@ -226,6 +234,33 @@ class FontBuilder:
             return
         font.kerning = hp / _HALF_PT_DIVISOR
 
+    @staticmethod
+    def _apply_locale(rPr: ET.Element, font: ldm.Font) -> None:
+        lang = rPr.find(f"{W_NS}lang")
+        if lang is None:
+            return
+        val = lang.get(f"{W_NS}val", "")
+        if val:
+            font.locale_id = _LANG_TAG_TO_LCID.get(val.lower(), 0)
+        bidi_val = lang.get(f"{W_NS}bidi", "")
+        if bidi_val:
+            font.locale_id_bi = _LANG_TAG_TO_LCID.get(bidi_val.lower(), 0)
+        ea_val = lang.get(f"{W_NS}eastAsia", "")
+        if ea_val:
+            font.locale_id_far_east = _LANG_TAG_TO_LCID.get(ea_val.lower(), 0)
+
+
+_LANG_TAG_TO_LCID: dict[str, int] = {
+    "en-us": 1033, "ru-ru": 1049, "zh-cn": 2052, "zh-tw": 1028,
+    "ja-jp": 1041, "ko-kr": 1042, "fr-fr": 1036, "de-de": 1031,
+    "es-es": 3082, "it-it": 1040, "pt-br": 1046, "ar-sa": 1025,
+    "he-il": 1037, "th-th": 1054, "vi-vn": 1066, "pl-pl": 1045,
+    "uk-ua": 1058, "cs-cz": 1029, "nl-nl": 1043, "sv-se": 1053,
+    "da-dk": 1030, "fi-fi": 1035, "nb-no": 1044, "hu-hu": 1038,
+    "ro-ro": 1048, "tr-tr": 1055, "el-gr": 1032, "bg-bg": 1026,
+    "hr-hr": 1050, "sk-sk": 1051, "sl-si": 1060,
+}
+
 
 class ParagraphFormatBuilder:
     """Build a non-cascaded :class:`ldm.ParagraphFormat` from one ``<w:pPr>``."""
@@ -312,7 +347,7 @@ class ParagraphFormatBuilder:
     def _apply_conditional(pPr: ET.Element, pf: ldm.ParagraphFormat) -> None:
         cnf = pPr.find(f"{W_NS}cnfStyle")
         if cnf is not None:
-            pf.conditional_style = cnf.get(f"{W_NS}val", "")
+            pf.conditional_style = ldm.ConditionalStyleMask.from_val(cnf.get(f"{W_NS}val", ""))
 
     @staticmethod
     def _apply_outline_level(pPr: ET.Element, pf: ldm.ParagraphFormat) -> None:
@@ -332,7 +367,8 @@ class ParagraphFormatBuilder:
     @staticmethod
     def _apply_borders(pPr: ET.Element, pf: ldm.ParagraphFormat) -> None:
         pBdr = pPr.find(f"{W_NS}pBdr")
-        pf.borders = build_borders(pBdr) if pBdr is not None else _empty_borders()
+        if pBdr is not None:
+            pf.borders = build_borders(pBdr)
 
     @staticmethod
     def _apply_tab_stops(pPr: ET.Element, pf: ldm.ParagraphFormat) -> None:
@@ -355,14 +391,14 @@ class ParagraphFormatBuilder:
     def _apply_mark_font(self, pPr: ET.Element, pf: ldm.ParagraphFormat) -> None:
         mark_rPr = pPr.find(f"{W_NS}rPr")
         if mark_rPr is not None:
-            pf.paragraph_mark_font = self._fonts.build(mark_rPr)
+            pf.paragraph_break_font = self._fonts.build(mark_rPr)
 
     @staticmethod
     def _apply_frame(pPr: ET.Element, pf: ldm.ParagraphFormat) -> None:
         frame_pr = pPr.find(f"{W_NS}framePr")
         if frame_pr is None:
             return
-        pf.frame = build_frame(frame_pr)
+        pf.frame_format = build_frame(frame_pr)
         raw_lines = frame_pr.get(f"{W_NS}lines")
         if raw_lines is not None:
             try:
@@ -493,8 +529,13 @@ class ParagraphFormatResolver:
         """Merge *override* into *base* with tab-stop clear-position semantics."""
         _set: set[str] = override.model_fields_set
         for field in MERGE_PF_FIELDS:
-            if field in _set:
-                setattr(base, field, getattr(override, field))
+            if field not in _set:
+                continue
+            if field == "shading":
+                val = getattr(override, field)
+                if val.background_pattern_color in ("", "auto") and not val.foreground_pattern_color:
+                    continue
+            setattr(base, field, getattr(override, field))
         if "tab_stops" not in _set:
             return
         if not override.tab_stops:

@@ -153,7 +153,7 @@ class DocTableBuilderMixin:
             .replace("\x00", "")
             .replace("\r", "\n")
         )
-        para.text = ct_clean
+
 
         char_ranges = self._get_char_props_in_range(cell_cp, cell_end)
         if char_ranges and ct_clean:
@@ -243,7 +243,8 @@ class DocTableBuilderMixin:
             if props._raw_grpprl is None:
                 continue
             tp = parse_table_row_sprms(props._raw_grpprl)
-            if tp.cell_widths or tp.has_positioning or tp.table_width > 0 or tp.borders:
+            if (tp.cell_widths or tp.has_positioning or tp.table_width > 0
+                    or tp.borders or tp.default_padding or tp.cell_padding):
                 row_sprms_list.append(tp)
 
         if not row_sprms_list:
@@ -252,11 +253,11 @@ class DocTableBuilderMixin:
         first_tp = row_sprms_list[0]
 
         if first_tp.table_width > 0:
-            tbl.preferred_width = f"{first_tp.table_width}pt"
+            tbl.preferred_width = ldm.PreferredWidth.from_points(first_tp.table_width)
         elif first_tp.has_positioning and first_tp.cell_widths:
             total_width = sum(first_tp.cell_widths)
             if total_width > 0:
-                tbl.preferred_width = f"{total_width}pt"
+                tbl.preferred_width = ldm.PreferredWidth.from_points(total_width)
 
         if first_tp.has_positioning:
             tbl.text_wrapping = 1
@@ -273,15 +274,34 @@ class DocTableBuilderMixin:
                 attrs["tblpXSpec"] = _HORZ_SPEC[first_tp.horz_pos]
             tbl._tblp_pr_attrs = attrs
 
+        # Table-level default cell margins (sprmTCellPaddingDefault → tblCellMar).
+        # Mirror the DOCX reader: keep the default on the table *and* cascade
+        # it onto every cell so a DOC and the equivalent DOCX yield the same
+        # effective per-cell padding in the LDM.
+        for side, value in first_tp.default_padding.items():
+            setattr(tbl, f"{side}_padding", value)
+        default_sides = ("left", "right", "top", "bottom")
+
         for row_idx, row in enumerate(tbl.rows):
             tp = row_sprms_list[row_idx] if row_idx < len(row_sprms_list) else first_tp
+            for cell in row.cells:
+                cf = cell.cell_format
+                for side in default_sides:
+                    setattr(cf, f"{side}_padding", getattr(tbl, f"{side}_padding"))
+            # Per-cell margin overrides (sprmTCellPadding → tcMar).
+            for itc_first, itc_lim, sides in tp.cell_padding:
+                for cell_idx in range(itc_first, min(itc_lim, len(row.cells))):
+                    cf = row.cells[cell_idx].cell_format
+                    for side, value in sides.items():
+                        setattr(cf, f"{side}_padding", value)
             if tp.borders:
                 ldm_borders = []
-                for brc_type, width_pt, color_str, _space in tp.borders:
+                for brc_type, width_pt, color_str, dpt_space in tp.borders:
                     ldm_borders.append(ldm.Border(
                         line_style=brc_type,
                         line_width=width_pt,
                         color=color_str,
+                        distance_from_text=float(dpt_space),
                     ))
                 row.row_format.borders = ldm_borders
             if tp.cell_widths:

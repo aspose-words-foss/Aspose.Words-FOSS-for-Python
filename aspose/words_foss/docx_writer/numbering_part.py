@@ -14,6 +14,7 @@ from aspose.words_foss import light_document_model as ldm
 from aspose.words_foss.docx_writer.constants import W_URI, pt_to_twips
 from aspose.words_foss.docx_writer.xml_utils import XML_DECL, el
 from aspose.words_foss.docx_writer.runs import render_rPr
+from aspose.words_foss.model.list_limits import MAX_LIST_LEVELS
 
 _NUMBER_FORMAT_VAL = {
     0: "decimal",
@@ -130,9 +131,9 @@ def _lvl_override_xml(override: "ldm.ListLevelOverride") -> str:
     ``<w:lvlOverride w:ilvl="N"/>`` byte-for-byte.
     """
     children: list[str] = []
-    if override.is_start_at:
-        children.append(el("w:startOverride", {"w:val": override.start_at_raw}))
-    if override.is_formatting and override.list_level is not None:
+    if override.start_at is not None:
+        children.append(el("w:startOverride", {"w:val": override.start_at}))
+    if override.list_level is not None:
         children.append(_level_xml(override.ilvl, override.list_level))
     return el("w:lvlOverride", {"w:ilvl": override.ilvl}, children)
 
@@ -160,7 +161,7 @@ def _ind_attrs_for_level(level: ldm.ListLevel) -> dict[str, object]:
 
 
 def _abstract_num(doc_list: ldm.DocList, num_id_map: Mapping[int, int]) -> str:
-    levels = doc_list.levels or [ldm.ListLevel(number_style=23)]
+    levels = (doc_list.list_levels or [ldm.ListLevel(number_style=23)])[:MAX_LIST_LEVELS]
     # ECMA-376 forbids more than one ``<w:lvl>`` under a
     # ``<w:multiLevelType w:val="singleLevel"/>`` abstractNum — Aspose
     # rejects the extras with "Import of element 'lvlText' is not
@@ -181,7 +182,8 @@ def _abstract_num(doc_list: ldm.DocList, num_id_map: Mapping[int, int]) -> str:
 def _num(doc_list: ldm.DocList, num_id_map: Mapping[int, int]) -> str:
     num_id = remap_num_id(doc_list.list_id, num_id_map)
     children: list[str] = [el("w:abstractNumId", {"w:val": num_id})]
-    for ov in doc_list.overrides:
+    in_range = [ov for ov in doc_list.overrides if 0 <= ov.ilvl < MAX_LIST_LEVELS]
+    for ov in in_range[:MAX_LIST_LEVELS]:
         children.append(_lvl_override_xml(ov))
     return el("w:num", {"w:numId": num_id}, children)
 

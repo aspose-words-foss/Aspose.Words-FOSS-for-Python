@@ -16,8 +16,9 @@ from aspose.words_foss.docx_writer.constants import W_URI, pt_to_half_pt, pt_to_
 from aspose.words_foss.docx_writer.paragraphs import pf_to_pPr_children
 from aspose.words_foss.docx_writer.runs import color_to_hex, render_rPr
 from aspose.words_foss.docx_writer.blank_template import latent_styles
-from aspose.words_foss.docx_writer.tables import _table_borders
+from aspose.words_foss.docx_writer.tables import _table_borders, _by_slot, _TC_BORDER_SIDES
 from aspose.words_foss.docx_writer.xml_utils import XML_DECL, el
+from aspose.words_foss.model.enums import StyleIdentifier
 from aspose.words_foss.model.style_identifiers import IDENTIFIER_TO_STYLE_ID
 from aspose.words_foss.docx_writer.paragraphs import _resolve_style_id
 
@@ -52,7 +53,7 @@ _NAMELESS_STYLE_PREFIX = "Style"
 # schema allows any string — sanitise so <w:pStyle> lookups succeed
 # (otherwise Word silently downgrades to Normal and rejects on strict load).
 def _sanitize_style_id(raw: str) -> str:
-    cleaned = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in raw)
+    cleaned = "".join(c for c in raw if c.isalnum() or c in ("-", "_"))
     if not cleaned or not (cleaned[0].isalpha() or cleaned[0] == "_"):
         cleaned = "_" + cleaned
     return cleaned
@@ -145,45 +146,64 @@ def _is_custom_style_name(name: str) -> bool:
     return _canonicalize_style_name(name) != name
 
 
+# (font name, size pt, bold, italic, kerning pt, keep next) per level,
+# as Aspose's AllStyles2003 resource defines the built-in headings.
+_HEADING_STYLE_LADDER = {
+    1: ("Arial", 16.0, True, False, 16.0, True),
+    2: ("Arial", 14.0, True, True, 0.0, True),
+    3: ("Arial", 13.0, True, False, 0.0, True),
+    4: ("", 14.0, True, False, 0.0, True),
+    5: ("", 13.0, True, True, 0.0, False),
+    6: ("", 11.0, True, False, 0.0, False),
+    7: ("", 0.0, False, False, 0.0, False),
+    8: ("", 0.0, False, True, 0.0, False),
+    9: ("Arial", 11.0, False, False, 0.0, False),
+}
+_HEADING_SPACE_BEFORE = 12.0
+_HEADING_SPACE_AFTER = 3.0
+
+
+def _builtin_heading_formats(level: int) -> tuple[ldm.ParagraphFormat, Optional[ldm.Font]]:
+    name, size, bold, italic, kerning, keep_next = _HEADING_STYLE_LADDER[level]
+    pf = ldm.ParagraphFormat(
+        space_before=_HEADING_SPACE_BEFORE,
+        space_after=_HEADING_SPACE_AFTER,
+        keep_with_next=keep_next,
+        outline_level=level - 1,
+    )
+    font: Optional[ldm.Font] = None
+    if name or size or bold or italic or kerning:
+        font = ldm.Font()
+        if name:
+            font.name = name
+        if size:
+            font.size = size
+        font.bold = bold
+        font.italic = italic
+        if kerning:
+            font.kerning = kerning
+    return pf, font
+
+
 def _heading_style(level: int) -> str:
     """Built-in ``HeadingN`` paragraph style.
 
     Outline level encodes the heading level so readers can recover it
     via ``pPr/outlineLvl`` even without a styles map.
     """
-    style_id = f"Heading{level}"
-    name = f"heading {level}"
-    pPr = el(
-        "w:pPr",
-        None,
-        [
-            el("w:keepNext"),
-            el("w:keepLines"),
-            el("w:outlineLvl", {"w:val": level - 1}),
-        ],
-    )
-    # Default size: 16pt → ~32 half-points for H1, decreasing by 2 each level
-    # (approximation matching Word defaults; precise values come from theme).
-    size = max(11, 18 - (level - 1) * 2)
-    rPr = el(
-        "w:rPr",
-        None,
-        [
-            el("w:b"),
-            el("w:sz", {"w:val": pt_to_half_pt(size)}),
-            el("w:szCs", {"w:val": pt_to_half_pt(size)}),
-        ],
-    )
+    pf, font = _builtin_heading_formats(level)
+    children = [
+        el("w:name", {"w:val": f"heading {level}"}),
+        el("w:basedOn", {"w:val": "Normal"}),
+        el("w:next", {"w:val": "Normal"}),
+        el("w:pPr", None, pf_to_pPr_children(pf)),
+    ]
+    if font is not None:
+        children.append(render_rPr(font, for_style=True) or el("w:rPr"))
     return el(
         "w:style",
-        {"w:type": "paragraph", "w:styleId": style_id},
-        [
-            el("w:name", {"w:val": name}),
-            el("w:basedOn", {"w:val": "Normal"}),
-            el("w:next", {"w:val": "Normal"}),
-            pPr,
-            rPr,
-        ],
+        {"w:type": "paragraph", "w:styleId": f"Heading{level}"},
+        children,
     )
 
 
@@ -229,6 +249,7 @@ def _custom_style(
     docDefaults_pf: Optional[ldm.ParagraphFormat],
     style_id_map: dict[str, str],
     style_font_map: dict[str, ldm.Font],
+    doc_defaults_font: Optional[ldm.Font] = None,
 ) -> str:
     """Render an LDM ``Style`` to ``<w:style>``.
 
@@ -250,32 +271,55 @@ def _custom_style(
         _is_custom_style_name(style.name) or style.style_identifier != 0
     ):
         style_attrs["w:customStyle"] = "1"
+    pf_source = style.paragraph_format
+    font_source = style.font
+    base_style_name = style.base_style_name
+    next_style_name = style.next_paragraph_style_name
+    if style.built_in and pf_source is None and font_source is None:
+        sid = style.style_identifier
+        if StyleIdentifier.HEADING_1 <= sid <= StyleIdentifier.HEADING_9 and not base_style_name:
+            pf_source, font_source = _builtin_heading_formats(sid)
+            base_style_name = "Normal"
+            next_style_name = next_style_name or "Normal"
+        elif sid == StyleIdentifier.FOOTNOTE_TEXT:
+            font_source = ldm.Font()
+            font_source.size = 10.0
+            base_style_name = base_style_name or "Normal"
+        elif sid == StyleIdentifier.FOOTNOTE_REFERENCE:
+            font_source = ldm.Font()
+            font_source.superscript = True
     children: list[str] = [el("w:name", {"w:val": style.name})]
-    if style.base_style_name:
+    if base_style_name:
         base_id = style_id_map.get(
-            style.base_style_name,
-            _sanitize_style_id(style.base_style_name.replace(" ", "")),
+            base_style_name,
+            _sanitize_style_id(base_style_name.replace(" ", "")),
         )
         children.append(el("w:basedOn", {"w:val": base_id}))
-    if style.next_paragraph_style_name:
+    if next_style_name:
         next_id = style_id_map.get(
-            style.next_paragraph_style_name,
-            _sanitize_style_id(style.next_paragraph_style_name.replace(" ", "")),
+            next_style_name,
+            _sanitize_style_id(next_style_name.replace(" ", "")),
         )
         children.append(el("w:next", {"w:val": next_id}))
     if style.priority != 99:
         children.append(el("w:uiPriority", {"w:val": str(style.priority)}))
-    if style.paragraph_format is not None:
+    if style.semi_hidden:
+        children.append(el("w:semiHidden"))
+    if style.unhide_when_used:
+        children.append(el("w:unhideWhenUsed"))
+    if style.locked:
+        children.append(el("w:locked"))
+    if pf_source is not None:
         # Paragraph styles diff against the basedOn chain (resolved pf);
         # table/character/numbering styles diff against zero (raw pPr).
         base_pf: Optional[ldm.ParagraphFormat] = None
         if style.type == 1:
-            if style.base_style_name:
-                canonical = style.base_style_name.replace(" ", "").lower()
+            if base_style_name:
+                canonical = base_style_name.replace(" ", "").lower()
                 base_pf = style_pf_map.get(canonical)
             if base_pf is None:
                 base_pf = docDefaults_pf
-        pf = style.paragraph_format
+        pf = pf_source
         # Synthesised outline_level (e.g. "Heading 0" → -1) means source
         # had no <w:outlineLvl>; suppress to avoid descendant is_heading flip.
         heading_match = _HEADING_NAME_RE.search(style.name)
@@ -291,8 +335,8 @@ def _custom_style(
         # the bullet/number glyph and pilcrow.  Emit a diff against the
         # basedOn's mark font so child styles only carry their explicit
         # overrides instead of duplicating the inherited block.
-        base_mark = base_pf.paragraph_mark_font if base_pf else None
-        mark_rPr = _render_style_mark_rPr(pf.paragraph_mark_font, base_mark)
+        base_mark = base_pf.paragraph_break_font if base_pf else None
+        mark_rPr = _render_style_mark_rPr(pf.paragraph_break_font, base_mark)
         if mark_rPr:
             pPr_children.append(mark_rPr)
         if pPr_children:
@@ -305,7 +349,7 @@ def _custom_style(
             # carried only ``<w:numPr>`` (encoded outside the pf in our
             # LDM) survives the round-trip.
             children.append(el("w:pPr"))
-    if style.font is not None:
+    if font_source is not None:
         # Mirror the paragraph_format diff strategy: paragraph-style fonts
         # are reader-resolved through the basedOn chain, so we diff
         # against the basedOn's resolved font to recover only the explicit
@@ -314,19 +358,29 @@ def _custom_style(
         # the diff is empty — the reader uses the element's *presence*
         # to decide whether to populate ``Style.font`` at all.
         base_font: Optional[ldm.Font] = None
-        if style.type == 1 and style.base_style_name:
-            canonical = style.base_style_name.replace(" ", "").lower()
-            base_font = style_font_map.get(canonical)
-        rPr = render_rPr(style.font, base=base_font, for_style=True) or el("w:rPr")
+        if style.type == 1:
+            if base_style_name:
+                canonical = base_style_name.replace(" ", "").lower()
+                base_font = style_font_map.get(canonical)
+            else:
+                base_font = doc_defaults_font
+        rPr = render_rPr(font_source, base=base_font, for_style=True) or el("w:rPr")
         children.append(rPr)
     if style.table_style_format is not None:
         tblPr = _render_style_tblPr(style.table_style_format)
         if tblPr:
             children.append(tblPr)
+    for tsp in style.table_style_properties:
+        rendered = _render_tblStylePr(tsp)
+        if rendered:
+            children.append(rendered)
     return el("w:style", style_attrs, children)
 
 
-def _docDefaults(normal_pf: Optional[ldm.ParagraphFormat]) -> str:
+def _docDefaults(
+    normal_pf: Optional[ldm.ParagraphFormat],
+    doc_defaults_font: Optional[ldm.Font] = None,
+) -> str:
     """Document-level defaults.
 
     The reader treats ``Normal``'s resolved :class:`ParagraphFormat` as the
@@ -336,22 +390,24 @@ def _docDefaults(normal_pf: Optional[ldm.ParagraphFormat]) -> str:
     that way paragraphs with no ``pStyle`` (and therefore no style chain to
     walk) still inherit the same spacing they had originally.  Normal's own
     ``<w:pPr>`` then ends up empty under the diff-vs-basedOn rule.
+
+    ``doc_defaults_font`` is the raw docDefaults-level font (not the
+    cascade-resolved Normal font) so the writer emits the original
+    rPrDefault without mixing in Normal's overrides.
     """
     pPrDefault_body: object = ""
     if normal_pf is not None:
         pPr_children = pf_to_pPr_children(normal_pf, base=None)
         if pPr_children:
             pPrDefault_body = el("w:pPr", None, pPr_children)
-    # ``rPrDefault`` left empty: hard-coding ``<w:rFonts w:ascii="Calibri"/>``
-    # would force every run that originally had no font name to inherit
-    # ``"Calibri"`` on the next read, inflating ``font.name`` LDM-wide.
-    # Documents that legitimately want a default font set it per-run via
-    # the styles chain instead.
+    rPr_body = ""
+    if doc_defaults_font is not None:
+        rPr_body = render_rPr(doc_defaults_font, for_style=True)
     return el(
         "w:docDefaults",
         None,
         [
-            el("w:rPrDefault", None, el("w:rPr")),
+            el("w:rPrDefault", None, rPr_body or el("w:rPr")),
             el("w:pPrDefault", None, pPrDefault_body) if pPrDefault_body else el("w:pPrDefault"),
         ],
     )
@@ -378,6 +434,35 @@ def _render_style_tblPr(tsf: ldm.TableStyleFormat) -> str:
     if not children:
         return ""
     return el("w:tblPr", None, children)
+
+
+def _render_tblStylePr(tsp: ldm.TableStyleProperty) -> str:
+    children: list[str] = []
+    if tsp.paragraph_format is not None:
+        pf_children = pf_to_pPr_children(tsp.paragraph_format)
+        if pf_children:
+            children.append(el("w:pPr", None, pf_children))
+    if tsp.font is not None:
+        rPr = render_rPr(tsp.font, for_style=True)
+        if rPr:
+            children.append(rPr)
+    if tsp.shading or tsp.borders:
+        tc_children: list[str] = []
+        if tsp.borders:
+            border_sides = _by_slot(tsp.borders, _TC_BORDER_SIDES)
+            if border_sides:
+                tc_children.append(el("w:tcBorders", None, border_sides))
+        if tsp.shading:
+            shading_hex = color_to_hex(tsp.shading.background_pattern_color)
+            if shading_hex:
+                tc_children.append(
+                    el("w:shd", {"w:val": "clear", "w:color": "auto", "w:fill": shading_hex})
+                )
+        if tc_children:
+            children.append(el("w:tcPr", None, tc_children))
+    if not children:
+        return ""
+    return el("w:tblStylePr", {"w:type": tsp.type}, children)
 
 
 def _collect_referenced_style_ids(
@@ -495,10 +580,7 @@ def render_styles_xml(doc: ldm.Document) -> str:
     style_font_map = build_style_font_map(doc)
     referenced_ids = _collect_referenced_style_ids(doc, style_id_map)
 
-    # Aspose blank's <w:latentStyles> table — mirrors what Word
-    # injects into every fresh doc to seed UI priorities for ~267
-    # built-in styles.  Round-trips opaquely.
-    children: list[str] = [_docDefaults(docDefaults_pf), latent_styles()]
+    children: list[str] = [_docDefaults(docDefaults_pf, doc.doc_defaults_font), latent_styles()]
     seen_ids: set[str] = set()
 
     for style in doc.styles:
@@ -507,7 +589,7 @@ def render_styles_xml(doc: ldm.Document) -> str:
             continue
         seen_ids.add(sid)
         children.append(
-            _custom_style(style, style_pf_map, docDefaults_pf, style_id_map, style_font_map)
+            _custom_style(style, style_pf_map, docDefaults_pf, style_id_map, style_font_map, doc.doc_defaults_font)
         )
 
     # Word always wants a Normal style row to exist, even if nothing

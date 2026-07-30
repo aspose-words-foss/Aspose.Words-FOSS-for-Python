@@ -114,8 +114,15 @@ SPRM_CFVANISH = 0x083C  # Hidden text
 SPRM_CFIMPRINT = 0x0854  # Imprint (engrave) character effect
 SPRM_CFEMBOSS = 0x0858  # Emboss character effect
 SPRM_CISTD = 0x4A30  # Character style index
+SPRM_CFNOPROOF = 0x083D  # No proofing (suppress spell-check)
+SPRM_CFBOLDBI = 0x085C  # Bold for complex script (BiDi) text
+SPRM_CFITALICBI = 0x085D  # Italic for complex script (BiDi) text
 SPRM_CFSPEC = 0x0855  # fSpec — special character (picture, symbol, etc.)
 SPRM_CPICLOCATION = 0x6A03  # PicLocation — offset into Data stream for inline picture
+SPRM_CRGFTC1 = 0x4A50  # Font index (Far East text)
+SPRM_CRGLID0 = 0x486D  # Language ID (ASCII/Latin)
+SPRM_CRGLID1 = 0x486E  # Language ID (Complex Script/BiDi)
+SPRM_CRGLID2 = 0x486F  # Language ID (Far East)
 
 # =============================================================================
 # Ico color table — MS-DOC indexed colors
@@ -195,6 +202,8 @@ SPRM_TTABLEWIDTH = 0xF614  # Table width
 SPRM_TTABLEBORDERS = 0xD613  # Table borders (BRC, 8 bytes per side)
 SPRM_TTABLEBORDERS80 = 0xD605  # Legacy table borders (BRC80, 4 bytes per side)
 SPRM_TPROPREV = 0x6036  # Compound table positioning (contains tblpY at bytes[2:4])
+SPRM_TCELLPADDINGDEFAULT = 0xD634  # Default cell margins for the table (tblCellMar)
+SPRM_TCELLPADDING = 0xD632  # Per-cell-range margins override (tcMar)
 
 # =============================================================================
 # Built-in style STI values (sti → canonical English name)

@@ -1,6 +1,6 @@
 [project]
 name = "aspose-words-foss"
-version = "26.5.0"
+version = "26.7.0"
 description = "Lightweight free open-source alternative to Aspose.Words — convert DOCX, DOC, RTF to Markdown, text, and PDF"
 readme = "README.md"
 license = "MIT"
@@ -15,8 +15,8 @@ keywords = [
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "olefile>=0.46",
-    "fpdf2>=2.7.0",
-    "pydantic>=2.0.0",
+    "fpdf2>=2.7.5",
+    "pydantic>=2.0.0"
 ]
 
 classifiers = [

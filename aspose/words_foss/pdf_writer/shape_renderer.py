@@ -7,6 +7,7 @@ from typing import Optional
 from fpdf import FPDF
 
 from aspose.words_foss import light_document_model as ldm
+from aspose.words_foss._visible_runs import is_horizontal_rule_shape
 from aspose.words_foss.model.wrap_type import WrapType
 from aspose.words_foss.model.enums import CellVerticalAlignment
 from aspose.words_foss.pdf_writer.color import parse_color
@@ -14,6 +15,7 @@ from aspose.words_foss.pdf_writer.constants import (
     DEFAULT_FONT_SIZE_PT,
     DEFAULT_LINE_WIDTH_MM,
     DEFAULT_SHAPE_DIM_PT,
+    HORIZONTAL_RULE_RGB,
     LINE_HEIGHT_FACTOR,
     MIN_LINE_WIDTH_MM,
     POST_IMAGE_SPACING_MM,
@@ -64,8 +66,11 @@ class ShapeRenderer:
 
         return image_bytes
 
-    def render_shape(self, pdf: FPDF, shape: ldm.ShapeNode) -> None:
-        """Render a ShapeNode: image first (if any), then text-box paragraphs."""
+    def render_shape(self, pdf: FPDF, shape: ldm.Shape) -> None:
+        """Render a Shape: image first (if any), then text-box paragraphs."""
+        if is_horizontal_rule_shape(shape):
+            self.render_horizontal_rule(pdf, shape)
+            return
         if shape.has_image and shape.image_data is not None:
             self.render_image_shape(pdf, shape)
 
@@ -73,8 +78,17 @@ class ShapeRenderer:
         for p in text_box.get("paragraphs", []) or []:
             self._writer._paragraph_renderer.render_paragraph(pdf, p)
 
-    def render_image_shape(self, pdf: FPDF, shape: ldm.ShapeNode) -> None:
-        """Embed an image from a ShapeNode into the PDF, scaling to fit page width."""
+    def render_horizontal_rule(self, pdf: FPDF, shape: ldm.Shape) -> None:
+        """Draw the rule the shape stands for across the content width."""
+        w = self._writer
+        y = pdf.get_y() + DEFAULT_FONT_SIZE_PT * PT_TO_MM / 2
+        pdf.set_line_width((shape.height or 1.5) * PT_TO_MM)
+        pdf.set_draw_color(*HORIZONTAL_RULE_RGB)
+        pdf.line(w._page_margin_left, y, w._page_width - w._page_margin_right, y)
+        pdf.set_y(y)
+
+    def render_image_shape(self, pdf: FPDF, shape: ldm.Shape) -> None:
+        """Embed an image from a Shape into the PDF, scaling to fit page width."""
         img = shape.image_data
         if img is None or not img.image_bytes:
             return
@@ -93,8 +107,8 @@ class ShapeRenderer:
             w_mm = usable_w
             h_mm = h_mm * scale
 
-        if shape.left > 0:
-            pdf.image(BytesIO(image_bytes), x=shape.left, w=w_mm, h=h_mm)
+        if shape._page_left_mm > 0:
+            pdf.image(BytesIO(image_bytes), x=shape._page_left_mm, w=w_mm, h=h_mm)
         else:
             pdf.image(BytesIO(image_bytes), w=w_mm, h=h_mm)
         pdf.ln(POST_IMAGE_SPACING_MM)
@@ -102,7 +116,7 @@ class ShapeRenderer:
     def render_floating_images(self, pdf: FPDF, para: ldm.Paragraph) -> None:
         """Draw ``wrapNone`` images at their anchor coordinates."""
         for extra in para._children:
-            if not isinstance(extra, ldm.ShapeNode):
+            if not isinstance(extra, ldm.Shape):
                 continue
             if not extra.has_image or extra.image_data is None:
                 continue
@@ -117,8 +131,8 @@ class ShapeRenderer:
             w_mm = w_pt * PT_TO_MM
             h_mm = h_pt * PT_TO_MM
             img_bytes = self.compress_image_bytes(img_bytes)
-            x = extra.left if extra.left > 0 else pdf.get_x()
-            para_offset = extra.top - (pdf.t_margin if extra.top > pdf.t_margin else 0)
+            x = extra._page_left_mm if extra._page_left_mm > 0 else pdf.get_x()
+            para_offset = extra._page_top_mm - (pdf.t_margin if extra._page_top_mm > pdf.t_margin else 0)
             y = saved_y + max(para_offset, 0)
             pdf.image(BytesIO(img_bytes), x=x, y=y, w=w_mm, h=h_mm)
             pdf.set_xy(saved_x, saved_y)
@@ -127,7 +141,7 @@ class ShapeRenderer:
         """Draw anchored (non-inline) shapes that wrap text around them."""
         writer = self._writer
         for extra in para._children:
-            if not isinstance(extra, ldm.ShapeNode):
+            if not isinstance(extra, ldm.Shape):
                 continue
             if extra._is_positioned:
                 continue
@@ -148,9 +162,9 @@ class ShapeRenderer:
 
             # positionH/@relativeFrom="column" is relative to the live column's left edge.
             if extra.relative_horizontal_position == 2:
-                x = saved_x + extra.horizontal_position
+                x = saved_x + extra.left
             else:
-                x = extra.left if extra.left > 0 else saved_x
+                x = extra._page_left_mm if extra._page_left_mm > 0 else saved_x
             x = max(x, writer._page_margin_left)
             y = saved_y
             img_bytes = self.compress_image_bytes(img_bytes)
@@ -188,7 +202,7 @@ class ShapeRenderer:
         saved_x, saved_y = pdf.get_x(), pdf.get_y()
         for para in paragraphs:
             for extra in para._children:
-                if not isinstance(extra, ldm.ShapeNode) or not extra._is_positioned:
+                if not isinstance(extra, ldm.Shape) or not extra._is_positioned:
                     continue
                 if extra.relative_vertical_position == 2:
                     continue
@@ -198,20 +212,20 @@ class ShapeRenderer:
     def render_positioned_shape(
         self,
         pdf: FPDF,
-        shape: ldm.ShapeNode,
+        shape: ldm.Shape,
         *,
         line_y_override: Optional[float] = None,
         y_override: Optional[float] = None,
     ) -> None:
         """Draw a positioned shape at its absolute page coordinates.
 
-        When *y_override* is supplied it replaces ``shape.top`` — used by
+        When *y_override* is supplied it replaces ``shape._page_top_mm`` — used by
         the paragraph renderer to position shapes whose
         ``relative_vertical_position`` is *Paragraph* (the anchor Y
         depends on where the host paragraph lands at render time).
         """
-        x = shape.left
-        y = shape.top if y_override is None else y_override
+        x = shape._page_left_mm
+        y = shape._page_top_mm if y_override is None else y_override
         w = shape.width or 0.0
         h = shape.height or 0.0
 
@@ -235,8 +249,8 @@ class ShapeRenderer:
             h = bottom
 
         # Rectangle fill and/or border.
-        fill_rgb = parse_color(shape.shading.background_pattern_color)
-        border = shape.borders[0] if shape.borders else None
+        fill_rgb = parse_color(shape.fill_color)
+        border = shape.stroke
         line_rgb = parse_color(border.color) if border else None
         draw_border = bool(line_rgb) and bool(border) and border.line_width > 0
 
@@ -307,9 +321,9 @@ class ShapeRenderer:
             content_h = self.estimate_text_box_height(paragraphs)
             inner_h = max(0.0, h - pad_t - pad_b)
             v_offset = 0.0
-            if shape.vertical_alignment == CellVerticalAlignment.CENTER and content_h < inner_h:
+            if shape.text_box_anchor == CellVerticalAlignment.CENTER and content_h < inner_h:
                 v_offset = (inner_h - content_h) / 2.0
-            elif shape.vertical_alignment == CellVerticalAlignment.BOTTOM and content_h < inner_h:
+            elif shape.text_box_anchor == CellVerticalAlignment.BOTTOM and content_h < inner_h:
                 v_offset = inner_h - content_h
 
             pdf.set_xy(x + pad_l, y + pad_t + v_offset)

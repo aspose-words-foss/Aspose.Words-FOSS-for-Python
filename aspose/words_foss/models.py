@@ -4,6 +4,15 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
 
+from aspose.words_foss.saving import (
+    MarkdownEmptyParagraphExportMode,
+    MarkdownExportAsHtml,
+    MarkdownLinkExportMode,
+    MarkdownListExportMode,
+    TableContentAlignment,
+    coerce_enum,
+)
+
 
 class HeadingStyle(Enum):
     """Heading export style preference."""
@@ -41,15 +50,28 @@ class ConversionOptions:
     table_pipe_style: bool = True
     wrap_width: Optional[int] = None
     escape_special_chars: bool = True
-    table_content_alignment: str = "auto"
-    list_export_mode: str = "markdown_syntax"
-    link_export_mode: str = "auto"
-    export_as_html: str = "none"
-    empty_paragraph_export_mode: str = "empty_line"
+    table_content_alignment: TableContentAlignment = TableContentAlignment.AUTO
+    list_export_mode: MarkdownListExportMode = MarkdownListExportMode.MARKDOWN_SYNTAX
+    link_export_mode: MarkdownLinkExportMode = MarkdownLinkExportMode.AUTO
+    export_as_html: MarkdownExportAsHtml = MarkdownExportAsHtml.NONE
+    empty_paragraph_export_mode: MarkdownEmptyParagraphExportMode = (
+        MarkdownEmptyParagraphExportMode.EMPTY_LINE
+    )
     export_images_as_base64: bool = False
     images_folder: str = ""
     images_folder_alias: str = ""
     paragraph_break: str = "\n"
+
+    def __post_init__(self) -> None:
+        # Accept the legacy lowercase string spellings as well as members.
+        for name, enum_cls in (
+            ("table_content_alignment", TableContentAlignment),
+            ("list_export_mode", MarkdownListExportMode),
+            ("link_export_mode", MarkdownLinkExportMode),
+            ("export_as_html", MarkdownExportAsHtml),
+            ("empty_paragraph_export_mode", MarkdownEmptyParagraphExportMode),
+        ):
+            setattr(self, name, coerce_enum(enum_cls, getattr(self, name)))
 
 
 @dataclass

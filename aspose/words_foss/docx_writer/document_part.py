@@ -28,6 +28,7 @@ from aspose.words_foss.docx_writer.styles_part import (
 )
 from aspose.words_foss.docx_writer.tables import render_table
 from aspose.words_foss.docx_writer.xml_utils import XML_DECL, el
+from aspose.words_foss.model.enums import Orientation
 
 _SECTION_START_TOKEN = {
     0: "continuous",
@@ -71,7 +72,7 @@ def _sectPr(
         pg_size_attrs["w:w"] = pt_to_twips(page_setup.page_width)
     if page_setup.page_height > 0:
         pg_size_attrs["w:h"] = pt_to_twips(page_setup.page_height)
-    if page_setup.orientation == 1:
+    if page_setup.orientation == Orientation.LANDSCAPE:
         pg_size_attrs["w:orient"] = "landscape"
     if pg_size_attrs:
         children.append(el("w:pgSz", pg_size_attrs))

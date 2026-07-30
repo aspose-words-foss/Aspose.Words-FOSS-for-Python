@@ -25,6 +25,28 @@ class BlipInfo:
         self.img_size = img_size  # image payload size (after blip header)
 
 
+class ShapeCropInfo:
+    """Escher crop properties for a shape (from FOpt records).
+
+    Values are stored in OOXML "1/1000th of a percent" units, matching the
+    ``ImageData.crop_*`` fields in the LDM.
+    """
+
+    __slots__ = ("crop_left", "crop_top", "crop_right", "crop_bottom")
+
+    def __init__(
+        self,
+        crop_left: int = 0,
+        crop_top: int = 0,
+        crop_right: int = 0,
+        crop_bottom: int = 0,
+    ):
+        self.crop_left = crop_left
+        self.crop_top = crop_top
+        self.crop_right = crop_right
+        self.crop_bottom = crop_bottom
+
+
 class ShapeLineProps:
     """Escher line/fill properties for a shape (from FOpt records)."""
 
@@ -212,6 +234,144 @@ def parse_shape_line_map(table: bytes, dgg_offset: int, dgg_size: int) -> dict[i
                 line_color_rgb=line_rgb,
                 line_width_pt=lw_pt,
                 fill_color_rgb=fill_rgb,
+            )
+    return result
+
+
+def _fixedpt_to_ooxml_pct(val: int) -> int:
+    """Convert Escher fixed-point 16.16 crop fraction to OOXML units.
+
+    Escher stores crop as signed 16.16 fixed-point (1/65536).
+    OOXML ``<a:srcRect>`` uses 1/1000th-of-a-percent (1/100000).
+    """
+    return round(val * 100000 / 65536)
+
+
+def parse_shape_textbox_insets(
+    table: bytes, dgg_offset: int, dgg_size: int
+) -> dict[int, tuple[int, int, int, int]]:
+    """Build spid -> ``(left, top, right, bottom)`` text insets (EMU).
+
+    Reads the Escher "Text Box" FOpt margin properties
+    (0x81 dxTextLeft, 0x82 dyTextTop, 0x83 dxTextRight, 0x84 dyTextBottom).
+    Any side a shape leaves unset is filled with the OOXML default so the
+    writer reproduces Word's text-box indents.  Only shapes carrying at
+    least one of these properties appear in the result.
+    """
+    data = table[dgg_offset : dgg_offset + dgg_size]
+
+    sp_records: list[tuple[int, int]] = []
+    for pos in range(0, len(data) - 12):
+        if data[pos + 2] == 0x0A and data[pos + 3] == 0xF0:
+            ver = data[pos] & 0x0F
+            cb = struct.unpack_from("<I", data, pos + 4)[0]
+            if ver == 0x02 and cb == 8:
+                spid = struct.unpack_from("<I", data, pos + 8)[0]
+                sp_records.append((pos, spid))
+
+    result: dict[int, tuple[int, int, int, int]] = {}
+    for pos in range(0, len(data) - 8):
+        if data[pos + 2] != 0x0B or data[pos + 3] != 0xF0:
+            continue
+        nprops = (data[pos] | (data[pos + 1] << 8)) >> 4
+        cb = struct.unpack_from("<I", data, pos + 4)[0]
+        if nprops <= 0 or nprops > 60 or cb < nprops * 6:
+            continue
+
+        owner_spid = None
+        for sp_off, spid in reversed(sp_records):
+            if sp_off < pos:
+                owner_spid = spid
+                break
+        if owner_spid is None:
+            continue
+
+        ins = {0x81: None, 0x82: None, 0x83: None, 0x84: None}
+        for p in range(nprops):
+            off = pos + 8 + p * 6
+            if off + 6 > len(data):
+                break
+            pid = struct.unpack_from("<H", data, off)[0] & 0x3FFF
+            if pid in ins:
+                ins[pid] = struct.unpack_from("<i", data, off + 2)[0]
+
+        if any(v is not None for v in ins.values()):
+            result[owner_spid] = (
+                ins[0x81] if ins[0x81] is not None else 91440,
+                ins[0x82] if ins[0x82] is not None else 45720,
+                ins[0x83] if ins[0x83] is not None else 91440,
+                ins[0x84] if ins[0x84] is not None else 45720,
+            )
+    return result
+
+
+def parse_shape_crop_map(
+    table: bytes, dgg_offset: int, dgg_size: int
+) -> dict[int, ShapeCropInfo]:
+    """Build spid -> ShapeCropInfo mapping from Escher FOpt crop properties.
+
+    Scans FOpt records for crop property IDs:
+      0x0100 = cropFromTop,  0x0101 = cropFromBottom,
+      0x0102 = cropFromLeft, 0x0103 = cropFromRight.
+
+    Returns ``{shape_id: ShapeCropInfo}``.
+    """
+    data = table[dgg_offset : dgg_offset + dgg_size]
+
+    sp_records: list[tuple[int, int]] = []
+    for pos in range(0, len(data) - 12):
+        if data[pos + 2] == 0x0A and data[pos + 3] == 0xF0:
+            ver = data[pos] & 0x0F
+            cb = struct.unpack_from("<I", data, pos + 4)[0]
+            if ver == 0x02 and cb == 8:
+                spid = struct.unpack_from("<I", data, pos + 8)[0]
+                sp_records.append((pos, spid))
+
+    result: dict[int, ShapeCropInfo] = {}
+    for pos in range(0, len(data) - 8):
+        if data[pos + 2] != 0x0B or data[pos + 3] != 0xF0:
+            continue
+        nprops = (data[pos] | (data[pos + 1] << 8)) >> 4
+        cb = struct.unpack_from("<I", data, pos + 4)[0]
+        if nprops <= 0 or nprops > 50 or cb < nprops * 6:
+            continue
+
+        owner_spid = None
+        for sp_off, spid in reversed(sp_records):
+            if sp_off < pos:
+                owner_spid = spid
+                break
+        if owner_spid is None:
+            continue
+
+        crop_top = crop_bottom = crop_left = crop_right = 0
+        found = False
+        for p in range(nprops):
+            off = pos + 8 + p * 6
+            if off + 6 > len(data):
+                break
+            pid = struct.unpack_from("<H", data, off)[0]
+            val = struct.unpack_from("<i", data, off + 2)[0]
+            base_pid = pid & 0x3FFF
+            if base_pid == 0x0100:
+                crop_top = val
+                found = True
+            elif base_pid == 0x0101:
+                crop_bottom = val
+                found = True
+            elif base_pid == 0x0102:
+                crop_left = val
+                found = True
+            elif base_pid == 0x0103:
+                crop_right = val
+                found = True
+
+        if found:
+            result[owner_spid] = ShapeCropInfo(
+                crop_left=_fixedpt_to_ooxml_pct(crop_left),
+                crop_top=_fixedpt_to_ooxml_pct(crop_top),
+                crop_right=_fixedpt_to_ooxml_pct(crop_right),
+                crop_bottom=_fixedpt_to_ooxml_pct(crop_bottom),
             )
     return result
 

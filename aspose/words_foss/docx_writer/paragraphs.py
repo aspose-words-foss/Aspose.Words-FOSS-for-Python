@@ -13,7 +13,9 @@ from aspose.words_foss.docx_writer.constants import (
 )
 from aspose.words_foss.docx_writer.numbering_part import remap_num_id
 from aspose.words_foss.docx_writer.runs import color_to_hex, render_rPr, render_run
+from aspose.words_foss.docx_writer.constants import LINE_STYLE_VAL, pt_to_eighths
 from aspose.words_foss.docx_writer.xml_utils import el
+from aspose.words_foss.model.list_limits import MAX_LIST_LEVELS
 
 _EMPTY_NUM_ID_MAP: Mapping[int, int] = {}
 
@@ -61,7 +63,7 @@ _FRAME_ENUM_OUT: tuple[tuple[str, str, dict[int, str]], ...] = (
 )
 _DROP_CAP_POSITION_TOKEN: dict[int, str] = {
     0: "none",
-    1: "drop",    
+    1: "drop",
     2: "margin",
 }
 
@@ -74,9 +76,9 @@ def _frame_pr_xml(
 ) -> str:
     """Render ``<w:framePr/>`` from a typed :class:`ldm.FrameFormat`.
 
-    The two drop-cap attributes (``w:lines`` / ``w:dropCap``) live on
-    ``ParagraphFormat``, so they are passed alongside the
-    frame instead of being read from it.
+    ``lines_to_drop`` and ``drop_cap_position`` live on
+    ``ParagraphFormat`` (not FrameFormat), so they are passed alongside
+    the frame.
     """
     attrs: dict[str, object] = {}
     for src, target in _FRAME_TWIP_OUT:
@@ -92,7 +94,7 @@ def _frame_pr_xml(
         attrs["w:lines"] = lines_to_drop
     if drop_cap_position:
         attrs["w:dropCap"] = _DROP_CAP_POSITION_TOKEN.get(drop_cap_position, "none")
-    if frame.lock_anchor:
+    if frame.anchor_locked:
         attrs["w:anchorLock"] = "1"
     return el("w:framePr", attrs)
 
@@ -155,6 +157,42 @@ def _normalize_tab_list(raw: object) -> list[tuple[float, int, int, bool]]:
     if isinstance(first, tuple):
         return [(p, a, l, False) for p, a, l in items]
     return [(t.position, t.alignment, t.leader, getattr(t, 'is_clear', False)) for t in items]
+
+
+_PARA_BORDER_SIDES: tuple[tuple[str, int], ...] = (
+    ("top", 3),
+    ("left", 1),
+    ("bottom", 0),
+    ("right", 2),
+    ("between", 4),
+)
+
+
+def _pbdr_side(name: str, border: ldm.Border) -> str:
+    val = LINE_STYLE_VAL.get(border.line_style, "none")
+    sz = pt_to_eighths(border.line_width) if border.line_width else 0
+    color = color_to_hex(border.color) or "auto"
+    space = int(border.distance_from_text) if border.distance_from_text else 0
+    attrs: dict[str, object] = {
+        "w:val": val, "w:sz": sz, "w:space": space, "w:color": color,
+    }
+    if border.shadow:
+        attrs["w:shadow"] = "1"
+    return el(f"w:{name}", attrs)
+
+
+def _paragraph_borders(borders: list[ldm.Border]) -> str:
+    if not borders:
+        return ""
+    sides: list[str] = []
+    for side, slot in _PARA_BORDER_SIDES:
+        if slot >= len(borders):
+            continue
+        border = borders[slot]
+        if border.line_style == 0 and border.line_width == 0.0 and border.is_visible:
+            continue
+        sides.append(_pbdr_side(side, border))
+    return el("w:pBdr", None, sides) if sides else ""
 
 
 def _spacing_attrs(pf: ldm.ParagraphFormat, base: ldm.ParagraphFormat) -> dict[str, object]:
@@ -277,17 +315,17 @@ def pf_to_pPr_children(
     # ``drop_cap_position``).  CT_PPrBase places ``<w:framePr>`` at
     # position 5, between ``<w:pageBreakBefore>`` and ``<w:widowControl>``.
     frame_changed = (
-        pf.frame != base.frame
+        pf.frame_format != base.frame_format
         or pf.lines_to_drop != base.lines_to_drop
         or pf.drop_cap_position != base.drop_cap_position
     )
     has_frame_data = (
-        pf.frame is not None
+        pf.frame_format is not None
         or pf.lines_to_drop
         or pf.drop_cap_position
     )
     if frame_changed and has_frame_data:
-        frame_for_xml = pf.frame or ldm.FrameFormat()
+        frame_for_xml = pf.frame_format or ldm.FrameFormat()
         children.append(
             _frame_pr_xml(
                 frame_for_xml,
@@ -301,10 +339,24 @@ def pf_to_pPr_children(
         if new_val != getattr(base, attr):
             children.append(_onoff_xml(tag, new_val))
 
+    if pf.borders != base.borders and pf.borders:
+        pbdr = _paragraph_borders(pf.borders)
+        if pbdr:
+            children.append(pbdr)
+
     shading_hex = color_to_hex(pf.shading.background_pattern_color)
     base_shading_hex = color_to_hex(base.shading.background_pattern_color)
-    if shading_hex != base_shading_hex:
-        if shading_hex:
+    pattern_hex = color_to_hex(pf.shading.foreground_pattern_color)
+    base_pattern_hex = color_to_hex(base.shading.foreground_pattern_color)
+    if (shading_hex, pattern_hex) != (base_shading_hex, base_pattern_hex):
+        if pattern_hex:
+            children.append(
+                el(
+                    "w:shd",
+                    {"w:val": "solid", "w:color": pattern_hex, "w:fill": shading_hex or "auto"},
+                )
+            )
+        elif shading_hex:
             children.append(
                 el(
                     "w:shd",
@@ -400,7 +452,7 @@ def pf_to_pPr_children(
     # ``<w:outlineLvl>``.  Emitting before ``<w:jc>`` produced a
     # schema-invalid order that Word flags as document corruption.
     if pf.conditional_style != base.conditional_style and pf.conditional_style:
-        children.append(el("w:cnfStyle", {"w:val": pf.conditional_style}))
+        children.append(el("w:cnfStyle", {"w:val": pf.conditional_style.to_val()}))
 
     return children
 
@@ -463,8 +515,9 @@ def render_pPr(
 
     if list_format and list_format.is_list_item:
         num_id = remap_num_id(list_format.list_id, num_id_map)
+        ilvl = max(0, min(list_format.list_level_number, MAX_LIST_LEVELS - 1))
         num_pr = [
-            el("w:ilvl", {"w:val": list_format.list_level_number}),
+            el("w:ilvl", {"w:val": ilvl}),
             el("w:numId", {"w:val": num_id}),
         ]
         children.append(el("w:numPr", None, num_pr))
@@ -476,7 +529,7 @@ def render_pPr(
     # against the basedOn pf's mark font so a child paragraph that
     # inherits the parent style's italic-bullet doesn't grow a redundant
     # rPr on every round-trip.
-    mark_rPr = _render_mark_rPr(pf.paragraph_mark_font, base_pf.paragraph_mark_font)
+    mark_rPr = _render_mark_rPr(pf.paragraph_break_font, base_pf.paragraph_break_font)
     if mark_rPr:
         children.append(mark_rPr)
 
@@ -494,7 +547,7 @@ def _render_mark_rPr(mark: Optional[ldm.Font], base_mark: Optional[ldm.Font]) ->
     Returns the empty string when ``mark`` matches the basedOn baseline
     or both sides are ``None``.  Always emits an empty ``<w:rPr/>`` when
     the LDM explicitly carries a default-valued mark font — the reader
-    populates ``paragraph_mark_font`` from the *element's presence*, not
+    populates ``paragraph_break_font`` from the *element's presence*, not
     its content.
     """
     if mark is None and base_mark is None:
@@ -640,7 +693,7 @@ def render_paragraph(
                 bm_id = bookmark_state.close(extra.name)
                 if bm_id is not None:
                     return el("w:bookmarkEnd", {"w:id": bm_id})
-        elif isinstance(extra, ldm.ShapeNode):
+        elif isinstance(extra, ldm.Shape):
             if image_state is not None:
                 return image_state.render_inline_shape(
                     extra,
@@ -671,8 +724,8 @@ def render_paragraph(
         return None
 
     base_font: Optional[ldm.Font] = None
-    if style_font_map is not None and para.paragraph_format.style_name:
-        canonical = para.paragraph_format.style_name.replace(" ", "").lower()
+    if style_font_map is not None:
+        canonical = para.paragraph_format.style_name.replace(" ", "").lower() if para.paragraph_format.style_name else "normal"
         base_font = style_font_map.get(canonical)
 
     # Walk ``children`` in source order — runs, bookmark / field

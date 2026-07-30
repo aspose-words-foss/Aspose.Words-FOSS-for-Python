@@ -378,7 +378,8 @@ class LdmPdfWriter:
         display_mode = _ZOOM_BEHAVIOR_TO_DISPLAY_MODE.get(zb)
         if display_mode is not None:
             pdf.set_display_mode(display_mode)
-        elif zb == PdfZoomBehavior.ZOOM_FACTOR:
+        elif zb == PdfZoomBehavior.ZOOM_FACTOR and opts.zoom_factor:
+            # 0 means "unspecified", not a zoom of nothing.
             pdf.set_display_mode(opts.zoom_factor)
 
     # ------------------------------------------------------------------
@@ -439,7 +440,7 @@ class LdmPdfWriter:
 
         anchored = [
             item for item in para._children
-            if isinstance(item, ldm.ShapeNode)
+            if isinstance(item, ldm.Shape)
             and not item._is_positioned
             and item.is_inline is False
             and item.wrap_type != WrapType.NONE
@@ -463,9 +464,9 @@ class LdmPdfWriter:
             h_mm = h_pt * PT_TO_MM
             saved_x, saved_y = pdf.get_x(), pdf.get_y()
             if item.relative_horizontal_position == 2:
-                x = saved_x + item.horizontal_position
+                x = saved_x + item.left
             else:
-                x = item.left if item.left > 0 else saved_x
+                x = item._page_left_mm if item._page_left_mm > 0 else saved_x
             x = max(x, self._page_margin_left)
             img_bytes = self._shape_renderer.compress_image_bytes(img_bytes)
             pdf.image(BytesIO(img_bytes), x=x, y=saved_y, w=w_mm, h=h_mm)
@@ -493,7 +494,7 @@ class LdmPdfWriter:
         wrap_h = 0.0  # anchored, treated as floating (no inline cost)
         inline_shape_h = 0.0
         for item in para._children:
-            if not isinstance(item, ldm.ShapeNode):
+            if not isinstance(item, ldm.Shape):
                 continue
             if item._is_positioned or item.wrap_type == WrapType.NONE:
                 continue

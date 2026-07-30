@@ -4,6 +4,7 @@ A lightweight, open-source Python library for converting DOCX, DOC, RTF, TXT, an
 
 A free, lightweight version of [Aspose.Words for Python via .NET](https://github.com/aspose-words/Aspose.Words-for-Python-via-.NET) with a compatible API (`Document`, `SaveFormat`, `SaveOptions`).
 
+[![PyPI](https://img.shields.io/pypi/v/aspose-words-foss.svg)](https://pypi.org/project/aspose-words-foss/)
 [![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -12,14 +13,16 @@ A free, lightweight version of [Aspose.Words for Python via .NET](https://github
 - **DOCX Read/Write**: Pure Python reader using only the standard library (`zipfile`, `xml.etree`)
 - **DOC Support**: Word 97-2003 binary format reader via `olefile`
 - **RTF Support**: Rich Text Format reader via OLE2 delegation
-- **Plain Text & Markdown Input**: Read `.txt` and `.md` files
+- **Markdown Import**: `.md` is parsed into the document model, not read as literal text — headings, bold/italic/strikethrough/inline code, ordered and nested lists, tables, block quotes, fenced code blocks, links, and base64-embedded images all become proper nodes, so Markdown converts to DOCX and PDF like any other input
+- **Plain Text Input**: Read `.txt` files
+- **File or Stream Input**: DOCX, DOC and RTF are auto-detected from magic bytes (anything else falls back to plain text); `LoadOptions.load_format` overrides the guess
 - **Markdown Export**: Rich formatting — headings, bold/italic/strikethrough/underline, ordered and unordered lists (including nested), tables, block quotes, code blocks, and hyperlinks. Encoding and paragraph break sequence are configurable
 - **PDF Export**: Generate PDF output via `fpdf2`. Applied `PdfSaveOptions` fields: `compliance`, `image_compression`, `jpeg_quality`, `outline_options`, `export_document_structure`, `export_bookmarks_outline`, `zoom_behavior`, `zoom_factor`, `display_doc_title`
 - **Plain Text Export**: Extract document text content
 
 ## Installation
 
-From PyPI:
+From [PyPI](https://pypi.org/project/aspose-words-foss/):
 
 ```bash
 pip install aspose-words-foss
@@ -69,6 +72,21 @@ doc = aw.Document("input.docx")
 text = doc.get_text()
 ```
 
+### Load from a stream
+
+```python
+import io
+import aspose.words_foss as aw
+
+with io.FileIO("input.docx") as stream:
+    doc = aw.Document(stream)              # DOCX / DOC / RTF from magic bytes
+
+opts = aw.LoadOptions()
+opts.load_format = aw.LoadFormat.MARKDOWN  # needed for .md, which has no magic bytes
+with io.FileIO("input.md") as stream:
+    doc = aw.Document(stream, opts)
+```
+
 ### Save with options
 
 ```python
@@ -102,21 +120,26 @@ doc.save("output.pdf", pdf_opts)
 
 - Python 3.10 or higher
 - olefile >= 0.46
-- fpdf2 >= 2.7.0
+- fpdf2 >= 2.7.5
 - pydantic >= 2.0.0
 
 ## API Examples
 
-Runnable examples demonstrating the `aspose.words_foss` API:
-ApiExamples folder
+Runnable examples demonstrating the `aspose.words_foss` API live in the `ApiExamples/` folder.
+
+The examples are written against the API both libraries share, so the same
+sources run on `aspose-words` too — replacing `aspose.words_foss` with
+`aspose.words` in the imports is the only edit needed.
 
 ### Files
 
 | File | What it shows |
 |------|---------------|
 | `convert_document.py` | Every input format (DOCX, DOC, RTF, TXT, MD) to every output format (Markdown, PDF, TXT) |
+| `loading_document.py` | Loading documents from a file path and from a binary stream, with `LoadOptions` |
+| `loading_markdown.py` | Reading Markdown from in-memory content |
 | `working_with_markdown_save_options.py` | `MarkdownSaveOptions` — `export_underline_formatting`, `encoding`, `paragraph_break` |
-| `working_with_ooxml_save_options.py` | `OoxmlSaveOptions` for DOCX export — `pretty_format`, `compression_level` |
+| `working_with_ooxml_save_options.py` | `OoxmlSaveOptions` for DOCX export — `pretty_format`, `compression_level`, `zip_64_mode` |
 | `working_with_pdf_save_options.py` | PDF export from all input formats |
 | `working_with_txt_save_options.py` | Plain-text export and `get_text()` |
 | `working_with_images.py` | Image-containing documents to all output formats |

@@ -104,7 +104,7 @@ def cell_text(cell: ldm.Cell) -> str:
 def is_pure_page_break(para: ldm.Paragraph) -> bool:
     """True when the paragraph contains only form-feeds and no images."""
     for item in para._children or ():
-        if isinstance(item, ldm.ShapeNode) and item.has_image:
+        if isinstance(item, ldm.Shape) and item.has_image:
             return False
     visible = False
     saw_form_feed = False
